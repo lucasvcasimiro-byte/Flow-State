@@ -156,16 +156,6 @@ def plot_distribution_grid(df, columns):
     plt.tight_layout()
     plt.show()
 
-def plot_correlation_heatmap(df, columns):
-    if columns is None:
-        raise ValueError("columns must be provided for plot_correlation_heatmap")
-    corr = df[columns].corr()
-    mask = np.triu(np.ones_like(corr, dtype=bool))
-    plt.figure(figsize=(10, 8))
-    sns.heatmap(corr, mask=mask, annot=True, fmt=".2f", cmap='coolwarm')
-    plt.title("Correlation Heatmap")
-    plt.show()
-
 def plot_scatter_insight(df, x_col, y_col, hue_col):
     plt.figure(figsize=(10, 6))
     sns.scatterplot(data=df, x=x_col, y=y_col, hue=hue_col, alpha=0.5)
