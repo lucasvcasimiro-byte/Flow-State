@@ -4,13 +4,12 @@ import numpy as np
 import seaborn as sns
 import matplotlib.pyplot as plt
 from sklearn.cluster import KMeans
-from sklearn.preprocessing import StandardScaler
 from icalendar import Calendar
 from datetime import datetime, time
+import pickle
 import warnings
 
 warnings.filterwarnings('ignore')
-
 st.set_page_config(page_title="WFH Burnout & Recovery App", layout="wide", page_icon="🧘")
 
 st.markdown("""
@@ -157,45 +156,45 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 # ==========================================
-# 1. DATA LOADING
+# 1. MODEL & DATA LOADING
 # ==========================================
-@st.cache_data
-def load_data():
+@st.cache_resource
+def load_model_data():
+    """Loads the pre-trained model payload, including scaler, KMeans, features, and dataset."""
+    with open('final_app_model.pkl', 'rb') as f:
+        return pickle.load(f)
+
+model_data = load_model_data()
+
+cluster_features = model_data.get('features', [
+    'work_hours', 'meetings_count', 'breaks_taken',
+    'after_hours_work', 'app_switches', 'sleep_hours', 'task_completion',
+    'isolation_index', 'fatigue_score', 'burnout_score'
+])
+
+df = model_data.get('data')
+if df is None:
     df = pd.read_csv('wfh_burnout_dataset.csv')
-    return df
 
-df = load_data()
+scaler = model_data['scaler']
+kmeans = model_data['kmeans']
 
-# MUST exactly match the order and names of UI inputs
-cluster_features = [
-    'work_hours', 'meetings_count', 'breaks_taken', 
-    'after_hours_work', 'app_switches', 'sleep_hours', 'task_completion', 
-    'isolation_index', 'fatigue_score'
-]
 
 # ==========================================
 # 2. CLUSTERING UTILITIES
 # ==========================================
-@st.cache_resource
-def train_clustering_model(data, features, n_clusters=3):
-    """
-    Fits and returns the Scaler and KMeans model without mutating global variables.
-    """
-    scaler = StandardScaler()
-    scaled_data = scaler.fit_transform(data[features])
-    
-    kmeans = KMeans(n_clusters=n_clusters, random_state=42)
-    kmeans.fit(scaled_data)
-    
-    return scaler, kmeans
+
+# NOTE: I removed the duplicate load_trained_model() from here! 
+# It is already correctly defined at the top of your file.
 
 @st.cache_data
 def get_cluster_info(_scaler, _kmeans, data, features, n_clusters=3):
     """
     Extracts explicit data outputs (labels, centroids, profiles) safely.
-    Uses _ underscores for parameters that shouldn't be hashed by Streamlit caching.
     """
-    labels = _kmeans.labels_
+    # FIX: actively predict labels on the loaded data instead of relying on training labels
+    scaled_data = _scaler.transform(data[features])
+    labels = _kmeans.predict(scaled_data)
     
     centroids = _scaler.inverse_transform(_kmeans.cluster_centers_)
     centroid_df = pd.DataFrame(centroids, columns=features)
@@ -254,9 +253,8 @@ def get_cluster_info(_scaler, _kmeans, data, features, n_clusters=3):
 
 def perform_clustering(data, features, n_clusters):
     """
-    Wrapper function to provide all 5 variables cleanly as requested.
+    Wrapper function to provide all variables cleanly using the pre-trained model.
     """
-    scaler, kmeans = train_clustering_model(data, features, n_clusters)
     labels, centroid_df, profiles = get_cluster_info(scaler, kmeans, data, features, n_clusters)
     return scaler, kmeans, labels, centroid_df, profiles
 
@@ -270,6 +268,15 @@ st.markdown("""
     <p>Analyze WFH habits, discover different <strong>person types</strong>, and get tailored recovery suggestions.</p>
 </div>
 """, unsafe_allow_html=True)
+
+# Add sidebar selector for number of clusters
+st.sidebar.header("⚙️ Model Settings")
+n_clusters_choice = st.sidebar.radio(
+    "Select number of clusters:",
+    options=[3, 4],
+    index=0,
+    help="Choose between 3 or 4 clusters for user profiling"
+)
 
 tab1, tab2, tab3, tab4, tab5 = st.tabs(["🗂️ Data Explorer", "🔍 Explore Clusters", "👤 Client Matcher", "🗓️ Calendar Analyzer", "⌚ Wearable Preview"])
 
@@ -362,6 +369,7 @@ with tab1:
         # -----------------------------------
         st.subheader("💡 Key Insights Summary")
         
+
         avg_work = df['work_hours'].mean()
         avg_sleep = df['sleep_hours'].mean()
         avg_fatigue = df['fatigue_score'].mean()
@@ -1031,3 +1039,4 @@ with tab5:
 
         st.markdown("---")
         st.caption("🚀 Architecture Note: This prototype utilizes highly deterministic heuristic safety thresholds. A future V2 production deployment would ingest continuous API time-series data to train a lightweight predictive model forecasting true live productivity cliffs.")
+
