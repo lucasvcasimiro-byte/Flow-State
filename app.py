@@ -1040,3 +1040,4 @@ with tab5:
         st.markdown("---")
         st.caption("🚀 Architecture Note: This prototype utilizes highly deterministic heuristic safety thresholds. A future V2 production deployment would ingest continuous API time-series data to train a lightweight predictive model forecasting true live productivity cliffs.")
 
+#s
