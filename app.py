@@ -98,8 +98,14 @@ def load_users():
         os.makedirs('user_data')
     if not os.path.exists(USER_FILE):
         return {}
-    with open(USER_FILE, 'r') as f:
-        return json.load(f)
+    try:
+        with open(USER_FILE, 'r') as f:
+            content = f.read().strip()
+            if not content:
+                return {}
+            return json.loads(content)
+    except Exception:
+        return {}
 
 def save_users(users):
     with open(USER_FILE, 'w') as f:
@@ -136,6 +142,7 @@ if not st.session_state['logged_in']:
                     st.error("Incorrect email or password.")
         with tab2:
             new_email = st.text_input("Email address", key="signup_email", placeholder="you@example.com")
+            new_username = st.text_input("Username / Display Name", key="signup_username", placeholder="e.g. John Doe (optional)")
             new_password = st.text_input("Password", type="password", key="signup_pass", placeholder="Min. 6 characters")
             if st.button("Create Account", use_container_width=True, key="btn_signup"):
                 users = load_users()
@@ -148,6 +155,7 @@ if not st.session_state['logged_in']:
                 else:
                     users[new_email] = {
                         'password': hash_password(new_password),
+                        'username': new_username.strip() if new_username.strip() else new_email.split('@')[0].split('.')[0].capitalize(),
                         'tasks': [],
                         'profile': {}
                     }
@@ -155,8 +163,34 @@ if not st.session_state['logged_in']:
                     st.success("Account created! Sign in to continue.")
     st.stop()
 
+# Safety check: ensure user is logged in before accessing user_data
+if not st.session_state['logged_in'] or not st.session_state['user_email']:
+    st.warning("Please log in to continue.")
+    st.stop()
+
+users = load_users()
+if st.session_state['user_email'] not in users:
+    users[st.session_state['user_email']] = {
+        'tasks': [],
+        'profile_name': None,
+        'profile_result': {},
+        'profile_inputs': {},
+        'username': st.session_state['user_email'].split('@')[0].split('.')[0].capitalize()
+    }
+    save_users(users)
+
+user_data = users[st.session_state['user_email']]
+
+# Ensure username field exists for legacy accounts
+if 'username' not in user_data:
+    user_data['username'] = st.session_state['user_email'].split('@')[0].split('.')[0].capitalize()
+    users[st.session_state['user_email']] = user_data
+    save_users(users)
+
+display_username = user_data.get('username')
+user_initials = (display_username[:2] if display_username else st.session_state['user_email'][:2]).upper()
+
 # ── Sidebar branding & navigation ──────────────────────────────────────────
-user_initials = st.session_state['user_email'][:2].upper()
 st.sidebar.markdown(f'''
     <div style="padding:1.2rem 0 0.5rem;">
         <div style="font-size:1.3rem;font-weight:700;color:#f1f5f9;letter-spacing:-0.5px;">⚡ FlowState</div>
@@ -167,11 +201,12 @@ st.sidebar.markdown(f'''
         <div style="background:linear-gradient(135deg,#6366f1,#8b5cf6);border-radius:50%;width:32px;height:32px;
                     display:flex;align-items:center;justify-content:center;color:#fff;font-weight:700;font-size:0.8rem;flex-shrink:0;">{user_initials}</div>
         <div>
-            <div style="font-size:0.78rem;color:#94a3b8;">Signed in as</div>
-            <div style="font-size:0.82rem;color:#e2e8f0;font-weight:600;word-break:break-all;">{st.session_state['user_email']}</div>
+            <div style="font-size:0.82rem;color:#e2e8f0;font-weight:600;word-break:break-all;">{display_username}</div>
+            <div style="font-size:0.72rem;color:#94a3b8;">{st.session_state['user_email']}</div>
         </div>
     </div>
 ''', unsafe_allow_html=True)
+
 menu = st.sidebar.radio(
     "Navigation",
     [
@@ -196,23 +231,20 @@ if menu == "Profile Insights":
     )
 
 st.sidebar.markdown("---")
+with st.sidebar.expander("⚙️ Account Settings"):
+    new_name = st.text_input("Change Display Name", value=display_username, key="change_display_name_input")
+    if st.button("Save Name", key="save_display_name_btn", use_container_width=True):
+        if new_name.strip():
+            users = load_users()
+            users[st.session_state['user_email']]['username'] = new_name.strip()
+            save_users(users)
+            st.success("Name updated!")
+            st.rerun()
+
 if st.sidebar.button("Sign Out", use_container_width=True):
     st.session_state['logged_in'] = False
     st.session_state['user_email'] = ""
     st.rerun()
-
-users = load_users()
-
-# Safety check: ensure user is logged in before accessing user_data
-if not st.session_state['logged_in'] or not st.session_state['user_email']:
-    st.warning("Please log in to continue.")
-    st.stop()
-
-if st.session_state['user_email'] not in users:
-    users[st.session_state['user_email']] = {'tasks': [], 'profile_name': None, 'profile_result': {}, 'profile_inputs': {}}
-    save_users(users)
-
-user_data = users[st.session_state['user_email']]
 
 # --------- Model & Utils Injection ---------
 
@@ -346,7 +378,7 @@ if menu == "Dashboard":
     # ── Header ────────────────────────────────────────────────────────────────
     greeting_hour = datetime.now().hour
     greeting = "Good morning" if greeting_hour < 12 else ("Good afternoon" if greeting_hour < 18 else "Good evening")
-    user_first = st.session_state['user_email'].split('@')[0].split('.')[0].capitalize()
+    user_first = user_data.get('username', st.session_state['user_email'].split('@')[0].split('.')[0].capitalize())
 
     st.markdown(f'<div class="header-style">{greeting}, {user_first}</div>', unsafe_allow_html=True)
     st.markdown('<div class="subheader-style">Here is your productivity snapshot for today.</div>', unsafe_allow_html=True)
