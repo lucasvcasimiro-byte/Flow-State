@@ -252,12 +252,21 @@ kmeans = model_data['kmeans']
 def get_cluster_info(_scaler, _kmeans, data, features, n_clusters=3):
     """
     Extracts explicit data outputs (labels, centroids, profiles) safely.
+    If n_clusters differs from the pre-trained model, it dynamically fits a new one.
     """
-    # FIX: actively predict labels on the loaded data instead of relying on training labels
     scaled_data = _scaler.transform(data[features])
-    labels = _kmeans.predict(scaled_data)
     
-    centroids = _scaler.inverse_transform(_kmeans.cluster_centers_)
+    if _kmeans.n_clusters != n_clusters:
+        dynamic_kmeans = KMeans(n_clusters=n_clusters, random_state=42)
+        dynamic_kmeans.fit(scaled_data)
+        labels = dynamic_kmeans.predict(scaled_data)
+        centroids = _scaler.inverse_transform(dynamic_kmeans.cluster_centers_)
+        used_kmeans = dynamic_kmeans
+    else:
+        labels = _kmeans.predict(scaled_data)
+        centroids = _scaler.inverse_transform(_kmeans.cluster_centers_)
+        used_kmeans = _kmeans
+    
     centroid_df = pd.DataFrame(centroids, columns=features)
     
     cluster_profiles = {}
@@ -310,14 +319,14 @@ def get_cluster_info(_scaler, _kmeans, data, features, n_clusters=3):
             
         cluster_profiles[i] = {"name": f"Type {i}: {name}", "suggestion": sugg}
         
-    return labels, centroid_df, cluster_profiles
+    return labels, centroid_df, cluster_profiles, used_kmeans
 
 def perform_clustering(data, features, n_clusters):
     """
-    Wrapper function to provide all variables cleanly using the pre-trained model.
+    Wrapper function to provide all variables cleanly using the pre-trained model or dynamically fitted model.
     """
-    labels, centroid_df, profiles = get_cluster_info(scaler, kmeans, data, features, n_clusters)
-    return scaler, kmeans, labels, centroid_df, profiles
+    labels, centroid_df, profiles, used_kmeans = get_cluster_info(scaler, kmeans, data, features, n_clusters)
+    return scaler, used_kmeans, labels, centroid_df, profiles
 
 
 # ==========================================
@@ -1429,10 +1438,10 @@ elif menu == "Profile Insights":
     elif action == "Explore Data Clusters":
         with st.container():
             st.header("👥 Person Profiles Overview")
-            st.markdown("Based on the data, employees fall into **3 distinct behavioral types**. Below is the final model categorization.")
+            st.markdown(f"Based on the data, employees fall into **{n_clusters_choice} distinct behavioral types**. Below is the final model categorization.")
             
-            # Always use fixed final model K=3
-            final_k = 3
+            # Use dynamic K from sidebar
+            final_k = n_clusters_choice
             scaler_temp, kmeans_temp, labels_temp, centroids_temp, profiles_temp = perform_clustering(df, cluster_features, final_k)
             
             # -----------------------------------
@@ -1484,13 +1493,16 @@ elif menu == "Profile Insights":
                 y_axis = st.selectbox("Y-Axis", display_features, index=2)
                 
                 st.markdown("### ⚖️ Profile Comparison")
-                st.info("🔹 **Type 0:** Tend to show elevated fatigue linked with highest average work hours.")
-                st.success("🔹 **Type 1:** Balanced habits resulting in strong sleep-to-fatigue ratios.")
-                st.warning("🔹 **Type 2:** Sleep deprived patterns dragging up background exhaustion.")
+                st.info("🔹 **Type 0:** The primary profile, typically representing the most common behavioral pattern.")
+                st.success("🔹 **Type 1:** Represents the first significant behavioral deviation from the norm.")
+                st.warning("🔹 **Type 2:** Usually captures edge cases like extreme work hours or sleep deprivation.")
+                if final_k > 3:
+                    st.error("🔹 **Type 3:** Captures highly specific sub-patterns only visible at higher cluster resolutions.")
         
             with v_col2:
                 fig, ax = plt.subplots(figsize=(7, 4))
-                sns.scatterplot(data=temp_df, x=x_axis, y=y_axis, hue='Person Type', ax=ax, palette=['#3b82f6', '#10b981', '#f59e0b'])
+                colors = ['#3b82f6', '#10b981', '#f59e0b', '#ef4444']
+                sns.scatterplot(data=temp_df, x=x_axis, y=y_axis, hue='Person Type', ax=ax, palette=colors[:final_k])
                 ax.set_xlabel(x_axis.replace('_', ' ').title())
                 ax.set_ylabel(y_axis.replace('_', ' ').title())
                 st.pyplot(fig)
