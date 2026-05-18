@@ -635,12 +635,34 @@ elif menu == "Calendar Analyzer":
     with col_c:
         commute_time = st.slider("How long does it take you to get home? (minutes)", 0, 120, 10)
     
+    # Initialize session state keys for calendar data if not present
+    if 'calendar_events' not in st.session_state:
+        users = load_users()
+        user_data = users[st.session_state['user_email']]
+        saved_events = user_data.get('calendar_events', [])
+        if saved_events:
+            loaded_events = []
+            for ev in saved_events:
+                # Convert ISO string values back to python datetime/date objects
+                loaded_events.append({
+                    'Event': ev['Event'],
+                    'Start': datetime.fromisoformat(ev['Start']),
+                    'End': datetime.fromisoformat(ev['End']),
+                    'Duration (mins)': ev['Duration (mins)'],
+                    'Date': datetime.fromisoformat(ev['Date']).date()
+                })
+            st.session_state['calendar_events'] = loaded_events
+            st.session_state['calendar_filename'] = user_data.get('calendar_filename', "Saved Calendar.ics")
+        else:
+            st.session_state['calendar_events'] = []
+            st.session_state['calendar_filename'] = ""
+
     uploaded_file = st.file_uploader("Upload a Calendar File (.ics)", type=["ics"])
     if uploaded_file is not None:
         try:
             cal = Calendar.from_ical(uploaded_file.read())
-            
             events = []
+            saved_to_json = []
             for component in cal.walk():
                 if component.name == "VEVENT":
                     summary = component.get('summary')
@@ -664,372 +686,404 @@ elif menu == "Calendar Analyzer":
                                 'Duration (mins)': duration,
                                 'Date': dtstart.date()
                             })
+                            saved_to_json.append({
+                                'Event': str(summary),
+                                'Start': dtstart.isoformat(),
+                                'End': dtend.isoformat(),
+                                'Duration (mins)': duration,
+                                'Date': dtstart.date().isoformat()
+                            })
             
             if len(events) == 0:
                 st.warning("No timed events found in the calendar.")
             else:
-                event_df = pd.DataFrame(events)
-                event_df = event_df.sort_values('Start').reset_index(drop=True)
-                dates = event_df['Date'].unique()
-                num_days = len(dates)
+                # Store in session state for instant retrieval
+                st.session_state['calendar_events'] = events
+                st.session_state['calendar_filename'] = uploaded_file.name
                 
-                # Global week aggregations
-                total_meetings_week = len(event_df)
-                total_hours_week = event_df['Duration (mins)'].sum() / 60.0
-                late_meetings_count = len(event_df[event_df['End'].dt.time > earliest_leave_time])
+                # Store in JSON database for persistent storage
+                users = load_users()
+                users[st.session_state['user_email']]['calendar_events'] = saved_to_json
+                users[st.session_state['user_email']]['calendar_filename'] = uploaded_file.name
+                save_users(users)
                 
-                meetings_per_day = event_df.groupby('Date').size()
-                busiest_day_date = meetings_per_day.idxmax()
-                best_day_date = meetings_per_day.idxmin()
-                
-                total_free_mins = 0
-                large_blocks_count = 0
-                short_gaps_count = 0
-                
-                # Pre-calculate global free time metrics
-                for d in dates:
-                    day_events = event_df[event_df['Date'] == d].sort_values('Start')
-                    day_start = datetime.combine(d, preferred_start_time)
-                    day_end = datetime.combine(d, earliest_leave_time)
-                    
-                    last_end_tracker = day_start
-                    for _, row in day_events.iterrows():
-                        ev_start = max(day_start, row['Start'])
-                        ev_end = min(day_end, row['End'])
-                        if ev_start > ev_end: 
-                            ev_start, ev_end = ev_end, ev_start
-                            
-                        if ev_start > last_end_tracker:
-                            gap = (ev_start - last_end_tracker).total_seconds() / 60.0
-                            total_free_mins += gap
-                            if gap >= 60: large_blocks_count += 1
-                            if 0 < gap < 30: short_gaps_count += 1
-                            
-                        last_end_tracker = max(last_end_tracker, ev_end)
-                        
-                    if last_end_tracker < day_end:
-                        gap = (day_end - last_end_tracker).total_seconds() / 60.0
-                        total_free_mins += gap
-                        if gap >= 60: large_blocks_count += 1
-                        if 0 < gap < 30: short_gaps_count += 1
-    
-                # Calculate Scores (0-10) heuristically
-                focus_score = round(min(10.0, (large_blocks_count / max(1, num_days)) * 3), 1)
-                fragmentation_score = round(min(10.0, (short_gaps_count / max(1, num_days)) * 2), 1)
-    
-                # -----------------------------------
-                # 1. Weekly Overview
-                # -----------------------------------
-                with st.container():
-                    st.subheader("📊 Weekly Overview")
-                    
-                    col1, col2, col3 = st.columns(3)
-                    col1.metric("Total Meetings", total_meetings_week)
-                    col2.metric("Total Meeting Time", f"{total_hours_week:.1f}h")
-                    col3.metric("Total Free Time", f"{int(total_free_mins//60)}h {int(total_free_mins%60)}m")
-                    
-                    st.markdown("<br>", unsafe_allow_html=True)
-                    
-                    col4, col5, col6 = st.columns(3)
-                    col4.metric("Focus Time Score", f"{focus_score} / 10")
-                    col5.metric("Fragmentation Score", f"{fragmentation_score} / 10")
-                    col6.metric("Late Meetings", late_meetings_count)
-                    
-                    st.markdown("---")
-    
-                # -----------------------------------
-                # 2. Weekly Insights
-                # -----------------------------------
-                with st.container():
-                    st.subheader("💡 Weekly Insights")
-                    weekly_recs = []
-                
-                if total_hours_week > 15:
-                    weekly_recs.append({"priority": 90, "category": "Overload", "message": f"You have {total_hours_week:.1f} hours of meetings this week. Prioritize delegating or declining non-essential invites.", "type": "warning"})
-                
-                if late_meetings_count >= 3:
-                    weekly_recs.append({"priority": 85, "category": "Balance", "message": f"You have {late_meetings_count} meetings extending past your earliest leave time ({earliest_leave_time.strftime('%H:%M')}). Try to enforce a harder evening boundary.", "type": "warning"})
-                    
-                weekly_recs.append({"priority": 80, "category": "Overload", "message": f"Your busiest day is {busiest_day_date.strftime('%A')} ({meetings_per_day.max()} meetings). Prepare in advance or avoid scheduling heavy tasks immediately before/after.", "type": "warning"})
-                weekly_recs.append({"priority": 75, "category": "Focus", "message": f"{best_day_date.strftime('%A')} is your lightest day ({meetings_per_day.min()} meetings) → guard this day aggressively for deep focus work.", "type": "success"})
-                
-                weekly_recs = sorted(weekly_recs, key=lambda x: x['priority'], reverse=True)[:3]
-                
-                for r in weekly_recs:
-                    if r['type'] == 'warning':
-                        st.warning(f"**{r['category']}:** {r['message']}")
-                    elif r['type'] == 'success':
-                        st.success(f"**{r['category']}:** {r['message']}")
-                    else:
-                        st.info(f"**{r['category']}:** {r['message']}")
-                
-                if not any(r['type'] == 'warning' for r in weekly_recs):
-                    st.success("✨ Your week looks structurally sound! Low overload risk detected.")
-    
-                st.markdown("---")
-    
-                # -----------------------------------
-                # 3. Daily Breakdown
-                # -----------------------------------
-                with st.container():
-                    st.subheader("📅 Daily Breakdown")
-                
-                for d in dates:
-                    day_events = event_df[event_df['Date'] == d].copy()
-                    day_events = day_events.sort_values('Start')
-                    num_meetings = len(day_events)
-                    day_name_str = d.strftime('%A, %d %B')
-                    
-                    with st.expander(f"{day_name_str} — {num_meetings} meeting{'s' if num_meetings != 1 else ''}"):
-                        day_total_mins = day_events['Duration (mins)'].sum()
-                        first_meet = day_events.iloc[0]['Start'].strftime('%H:%M') if num_meetings > 0 else "N/A"
-                        last_meet = day_events.iloc[-1]['End'].strftime('%H:%M') if num_meetings > 0 else "N/A"
-                        longest_meet_mins = day_events['Duration (mins)'].max() if num_meetings > 0 else 0
-                        
-                        # Find Free Time for the specific day between preferred start and earliest leave
-                        day_start = datetime.combine(d, preferred_start_time)
-                        day_end = datetime.combine(d, earliest_leave_time)
-                        local_free_mins = 0
-                        
-                        last_e = day_start
-                        for _, row in day_events.iterrows():
-                            ev_s = max(day_start, row['Start'])
-                            ev_e = min(day_end, row['End'])
-                            if ev_s > ev_e: ev_s, ev_e = ev_e, ev_s
-                            if ev_s > last_e:
-                                gap = (ev_s - last_e).total_seconds() / 60.0
-                                local_free_mins += gap
-                            last_e = max(last_e, ev_e)
-                        
-                        if last_e < day_end:
-                            gap = (day_end - last_e).total_seconds() / 60.0
-                            local_free_mins += gap
-                        
-                        # Display Daily Metrics
-                        c1, c2, c3, c4, c5 = st.columns(5)
-                        c1.metric("Tot. Meet Time", f"{int(day_total_mins//60)}h {int(day_total_mins%60)}m")
-                        c2.metric("Free Time", f"{int(local_free_mins//60)}h {int(local_free_mins%60)}m")
-                        c3.metric("Longest Meet", f"{int(longest_meet_mins)}m")
-                        c4.metric("First Start", first_meet)
-                        c5.metric("Last End", last_meet)
-                        
-                        # Visual Agenda Display
-                        st.markdown("##### 📝 Schedule")
-                        
-                        agenda_html = ['<div class="agenda-container">']
-                        last_end_agenda = datetime.combine(d, preferred_start_time)
-                        
-                        for _, row in day_events.iterrows():
-                            ev_start = row['Start']
-                            ev_end = row['End']
-                            title = row['Event']
-                            dur = row['Duration (mins)']
-                            
-                            # Free block logic
-                            if ev_start > last_end_agenda:
-                                gap = (ev_start - last_end_agenda).total_seconds() / 60.0
-                                if gap >= 30:
-                                    agenda_html.append(
-                                        '<div class="agenda-free">'
-                                        f"☕ {last_end_agenda.strftime('%H:%M')} – {ev_start.strftime('%H:%M')} | {int(gap)} min Free Block"
-                                        '</div>'
-                                    )
-                            
-                            # Meeting card logic
-                            color_class = "normal"
-                            if dur < 30: color_class = "short"
-                            elif dur > 90: color_class = "long"
-                            
-                            agenda_html.append(
-                                f'<div class="agenda-card {color_class}">'
-                                f'<div class="agenda-time">{ev_start.strftime("%H:%M")} – {ev_end.strftime("%H:%M")}</div>'
-                                f'<div class="agenda-title">🔹 {title}</div>'
-                                f'<div class="agenda-duration">🕒 {int(dur)} mins</div>'
-                                '</div>'
-                            )
-                            
-                            last_end_agenda = max(last_end_agenda, ev_end)
-                        
-                        # Free block logic to end of day boundary
-                        day_end_agenda = datetime.combine(d, earliest_leave_time)
-                        if last_end_agenda < day_end_agenda:
-                            gap = (day_end_agenda - last_end_agenda).total_seconds() / 60.0
-                            if gap >= 30:
-                                agenda_html.append(
-                                    '<div class="agenda-free">'
-                                    f"🚀 {last_end_agenda.strftime('%H:%M')} – {day_end_agenda.strftime('%H:%M')} | {int(gap)} min Focus / Wrap-up"
-                                    '</div>'
-                                )
-    
-                        agenda_html.append('</div>')
-                        st.markdown("".join(agenda_html), unsafe_allow_html=True)
-                        
-                        with st.expander("Show raw events table"):
-                            display_df = day_events.copy()
-                            display_df['Start'] = display_df['Start'].dt.strftime('%H:%M')
-                            display_df['End'] = display_df['End'].dt.strftime('%H:%M')
-                            st.dataframe(display_df[['Event', 'Start', 'End', 'Duration (mins)']], use_container_width=True)
-                        
-                        # Daily Recommendations
-                        st.markdown("##### 💡 Daily Advice")
-                        show_more_day = st.checkbox("Show more recommendations", key=f"show_more_{d}")
-                        max_recs = 6 if show_more_day else 3
-                        
-                        recs = []
-                        
-                        # Rule 1: Lunch verification
-                        lunch_start = datetime.combine(d, time(12, 0))
-                        lunch_end = datetime.combine(d, time(14, 0))
-                        has_lunch = False
-                        l_track = lunch_start
-                        for _, row in day_events.iterrows():
-                            ev_start = row['Start']
-                            if ev_start > l_track and ev_start <= lunch_end:
-                                if (ev_start - l_track).total_seconds() / 60.0 >= 30:
-                                    has_lunch = True
-                            l_track = max(l_track, row['End'])
-                        if l_track < lunch_end and (lunch_end - l_track).total_seconds() / 60.0 >= 30:
-                            has_lunch = True
-                            
-                        if not has_lunch and num_meetings > 0:
-                            recs.append({"priority": 95, "category": "Break", "message": "No proper lunch break scheduled → guard 30+ minutes between 12:00 and 14:00.", "type": "warning"})
-    
-                        # Rule 2: Overloads
-                        if day_total_mins > 240:
-                            recs.append({"priority": 90, "category": "Overload", "message": "Heavy meeting day (>4 hrs) → avoid demanding tasks immediately after meetings.", "type": "warning"})
-                        if num_meetings >= 5:
-                            recs.append({"priority": 85, "category": "Overload", "message": f"{num_meetings} meetings today → evaluate deferring non-essential ones.", "type": "warning"})
-                            
-                        # Rule 3: Buffer integration (long / back-to-back)
-                        if longest_meet_mins > 90:
-                            recs.append({"priority": 80, "category": "Buffer", "message": "You have a long meeting (>90 mins) → ensure you take a strict recovery buffer immediately afterward.", "type": "warning"})
-    
-                        has_b2b = False
-                        for i in range(len(day_events) - 1):
-                            curr_end = day_events.iloc[i]['End']
-                            next_start = day_events.iloc[i+1]['Start']
-                            gap = (next_start - curr_end).total_seconds() / 60.0
-                            
-                            # Back-to-back buffer
-                            if 0 <= gap < 10:
-                                has_b2b = True
-                                
-                            # Focus block / Email window (integrate directly)
-                            if gap >= 60:
-                                recs.append({"priority": 65, "category": "Focus", "message": f"Large free block from {curr_end.strftime('%H:%M')} to {next_start.strftime('%H:%M')} → reserve this exclusively for deep work.", "type": "success"})
-                            elif 30 <= gap < 60:
-                                recs.append({"priority": 60, "category": "Email", "message": f"Short gap from {curr_end.strftime('%H:%M')} to {next_start.strftime('%H:%M')} → optimal window for processing emails/admin.", "type": "info"})
-                                
-                        if has_b2b:
-                            recs.append({"priority": 80, "category": "Buffer", "message": "You have consecutive back-to-back meetings → consider stepping away for short 5-minute transition breaks.", "type": "warning"})
-                            
-                        # Rule 4: Preferred bounds and commute
-                        if num_meetings > 0:
-                            first_m = day_events.iloc[0]['Start']
-                            if first_m > day_start and (first_m - day_start).total_seconds() / 60.0 >= 60:
-                                recs.append({"priority": 68, "category": "Focus", "message": f"Your morning is entirely clear until {first_m.strftime('%H:%M')} → excellent time for uninterrupted focus.", "type": "success"})
-    
-                            last_m = day_events.iloc[-1]['End']
-                            
-                            # No afternoon meetings check (After 13:00)
-                            if last_m.hour < 13:
-                                recs.append({"priority": 70, "category": "Focus", "message": "You do not have meetings in the afternoon, so this is a great time to complete important tasks or admin work.", "type": "success"})
-                            
-                            if last_m >= day_end:
-                                arr_time = last_m + pd.Timedelta(minutes=commute_time)
-                                recs.append({"priority": 50, "category": "Commute", "message": f"Last meeting runs until {last_m.strftime('%H:%M')}. With commute, you'd arrive home around {arr_time.strftime('%H:%M')}.", "type": "warning"})
-                            else:
-                                rem_mins = (day_end - last_m).total_seconds() / 60.0
-                                if rem_mins <= 45:
-                                    recs.append({"priority": 60, "category": "Commute", "message": f"No meetings after {last_m.strftime('%H:%M')}. Assuming tasks are complete, leaving around your earliest departure ({earliest_leave_time.strftime('%H:%M')}) is realistic.", "type": "info"})
-                                else:
-                                    recs.append({"priority": 58, "category": "Admin", "message": f"No meetings after {last_m.strftime('%H:%M')}. Use the remaining time until {earliest_leave_time.strftime('%H:%M')} for focused work or end-of-day planning.", "type": "info"})
-                            
-                        # Sort and trim daily recommendations
-                        recs = sorted(recs, key=lambda x: x['priority'], reverse=True)
-                        final_recs = []
-                        seen_cats = set()
-                        for r in recs:
-                            # Filter to max 1 per category for diversity
-                            if r['category'] not in seen_cats:
-                                final_recs.append(r)
-                                seen_cats.add(r['category'])
-                        
-                        final_recs_trimmed = final_recs[:max_recs]
-                        
-                        if not final_recs_trimmed:
-                            st.success("✨ Your day is perfectly balanced. Enjoy!")
-                        else:
-                            for r in final_recs_trimmed:
-                                if r['type'] == 'warning':
-                                    st.warning(f"**{r['category']}:** {r['message']}")
-                                elif r['type'] == 'success':
-                                    st.success(f"**{r['category']}:** {r['message']}")
-                                else:
-                                    st.info(f"**{r['category']}:** {r['message']}")
-    
-                st.markdown("---")
-                
-                # -----------------------------------
-                # 4. Behavioral Interpretation
-                # -----------------------------------
-                with st.container():
-                    st.subheader("🧩 Behavioral Interpretation")
-                    st.markdown("**Based on your weekly schedule patterns, your work rhythm is most similar to:**")
-                    
-                    # Rule-based heuristic match leveraging contextual week variables
-                    if total_hours_week >= 15 and (focus_score < 4.0 or late_meetings_count >= 3):
-                        matched_profile = "The Overworked & Exhausted"
-                        match_reason = f"Your week shows a heavy meeting load ({total_hours_week:.1f} hours) with frequent interruptions, significantly reducing your opportunity for deep work."
-                        sugg_1 = f"You have {late_meetings_count} late meetings this week. Consider enforcing a strict log-off boundary to avoid compounding exhaustion." if late_meetings_count > 0 else "Avoid scheduling complex tasks at the end of the day when background fatigue is highest."
-                        sugg_2 = f"{best_day_date.strftime('%A')} is your lightest day. Guard this block aggressively for uninterrupted deep work to catch up without distractions."
-                        match_border = "#ef4444"
-                        match_bg = "#fef2f2"
-                        match_icon = "🚨"
-                        
-                    elif focus_score >= 6.0 and total_hours_week <= 12 and late_meetings_count <= 1:
-                        matched_profile = "The Balanced Worker"
-                        match_reason = f"Your schedule maintains an excellent separation between collaboration and focus time."
-                        sugg_1 = f"Maintain the boundaries you've set, especially on {best_day_date.strftime('%A')} where you have the highest focus efficiency."
-                        sugg_2 = "Use short 10-minute buffers after intense meetings to avoid accumulating cognitive fatigue throughout the day."
-                        match_border = "#10b981"
-                        match_bg = "#f0fdf4"
-                        match_icon = "✅"
-                        
-                    elif fragmentation_score >= 6.0 or (total_hours_week < 15 and late_meetings_count >= 2):
-                        matched_profile = "The Sleep-Deprived / Fragmented"
-                        match_reason = f"Your schedule is highly scattered. Even with fewer total hours, frequent context-switching prevents meaningful progress and raises overall exhaustion."
-                        sugg_1 = f"Batch your meetings! For example, {busiest_day_date.strftime('%A')} is loaded with disjointed blocks. Consolidate those calls to open up contiguous free blocks."
-                        sugg_2 = "Turn off notifications entirely during gaps shorter than 30 minutes to give your brain a true recovery transition."
-                        match_border = "#f59e0b"
-                        match_bg = "#fffbeb"
-                        match_icon = "⚠️"
-                        
-                    else:
-                        matched_profile = "The Flexible Worker"
-                        match_reason = "Your week shows a balanced workload, but frequent interruptions or ad-hoc meetings may reduce your focus efficiency."
-                        sugg_1 = f"Identify your best focus window on {best_day_date.strftime('%A')} (your lightest day) and permanently block it out directly in your calendar."
-                        sugg_2 = "Evaluate if any of your recurring scattered meetings across the week can be consolidated to an afternoon."
-                        match_border = "#3b82f6"
-                        match_bg = "#eff6ff"
-                        match_icon = "☕"
-                    
-                    st.markdown(f'''
-                    <div style="background-color: {match_bg}; border-left: 5px solid {match_border}; border-radius: 8px; padding: 1.5rem; margin-top: 1rem; box-shadow: 0 4px 6px -1px rgba(0,0,0,0.05); color: #1f2937;">
-                        <h3 style="margin-top: 0; color: #111827;">{match_icon} {matched_profile}</h3>
-                        <p style="font-size: 1.05rem; margin-bottom: 1.5rem; line-height: 1.6;"><strong>Why?</strong> {match_reason}</p>
-                        <h5 style="color: #374151; margin-bottom: 0.5rem; font-weight: 600;">Contextual Recommendations:</h5>
-                        <ul style="padding-left: 1.5rem; margin-bottom: 1.5rem; line-height: 1.6;">
-                            <li style="margin-bottom: 0.5rem;">{sugg_1}</li>
-                            <li>{sugg_2}</li>
-                        </ul>
-                        <p style="font-size: 0.8rem; color: #6b7280; margin: 0; font-style: italic;">
-                            Note: This is an analytical estimation based purely on your calendar timeline. It functions independently of the machine learning clustering model.
-                                        '</p>
-                    </div>
-                    ''', unsafe_allow_html=True)
+                st.success(f"Successfully loaded and persisted: {uploaded_file.name}")
+                st.rerun()
         except Exception as e:
             st.error(f"Error parsing the calendar file: {e}")
+
+    # Render main content if calendar is loaded
+    active_events = st.session_state.get('calendar_events', [])
+    if active_events:
+        st.markdown('<div class="card-container" style="border-left:4px solid #10b981; margin-bottom:1.5rem;">', unsafe_allow_html=True)
+        col_info, col_clear = st.columns([4, 1])
+        with col_info:
+            st.markdown(f"📅 **Active Calendar:** `{st.session_state.get('calendar_filename', 'Loaded Calendar')}`")
+        with col_clear:
+            if st.button("🗑️ Clear Calendar", use_container_width=True):
+                st.session_state['calendar_events'] = []
+                st.session_state['calendar_filename'] = ""
+                users = load_users()
+                users[st.session_state['user_email']]['calendar_events'] = []
+                users[st.session_state['user_email']]['calendar_filename'] = ""
+                save_users(users)
+                st.rerun()
+        st.markdown('</div>', unsafe_allow_html=True)
+
+        event_df = pd.DataFrame(active_events)
+        event_df = event_df.sort_values('Start').reset_index(drop=True)
+        dates = event_df['Date'].unique()
+        num_days = len(dates)
+                
+        # Global week aggregations
+        total_meetings_week = len(event_df)
+        total_hours_week = event_df['Duration (mins)'].sum() / 60.0
+        late_meetings_count = len(event_df[event_df['End'].dt.time > earliest_leave_time])
+        
+        meetings_per_day = event_df.groupby('Date').size()
+        busiest_day_date = meetings_per_day.idxmax()
+        best_day_date = meetings_per_day.idxmin()
+        
+        total_free_mins = 0
+        large_blocks_count = 0
+        short_gaps_count = 0
+        
+        # Pre-calculate global free time metrics
+        for d in dates:
+            day_events = event_df[event_df['Date'] == d].sort_values('Start')
+            day_start = datetime.combine(d, preferred_start_time)
+            day_end = datetime.combine(d, earliest_leave_time)
+            
+            last_end_tracker = day_start
+            for _, row in day_events.iterrows():
+                ev_start = max(day_start, row['Start'])
+                ev_end = min(day_end, row['End'])
+                if ev_start > ev_end: 
+                    ev_start, ev_end = ev_end, ev_start
+                    
+                if ev_start > last_end_tracker:
+                    gap = (ev_start - last_end_tracker).total_seconds() / 60.0
+                    total_free_mins += gap
+                    if gap >= 60: large_blocks_count += 1
+                    if 0 < gap < 30: short_gaps_count += 1
+                    
+                last_end_tracker = max(last_end_tracker, ev_end)
+                
+            if last_end_tracker < day_end:
+                gap = (day_end - last_end_tracker).total_seconds() / 60.0
+                total_free_mins += gap
+                if gap >= 60: large_blocks_count += 1
+                if 0 < gap < 30: short_gaps_count += 1
+    
+        # Calculate Scores (0-10) heuristically
+        focus_score = round(min(10.0, (large_blocks_count / max(1, num_days)) * 3), 1)
+        fragmentation_score = round(min(10.0, (short_gaps_count / max(1, num_days)) * 2), 1)
+    
+        # -----------------------------------
+        # 1. Weekly Overview
+        # -----------------------------------
+        with st.container():
+            st.subheader("📊 Weekly Overview")
+            
+            col1, col2, col3 = st.columns(3)
+            col1.metric("Total Meetings", total_meetings_week)
+            col2.metric("Total Meeting Time", f"{total_hours_week:.1f}h")
+            col3.metric("Total Free Time", f"{int(total_free_mins//60)}h {int(total_free_mins%60)}m")
+            
+            st.markdown("<br>", unsafe_allow_html=True)
+            
+            col4, col5, col6 = st.columns(3)
+            col4.metric("Focus Time Score", f"{focus_score} / 10")
+            col5.metric("Fragmentation Score", f"{fragmentation_score} / 10")
+            col6.metric("Late Meetings", late_meetings_count)
+            
+            st.markdown("---")
+    
+        # -----------------------------------
+        # 2. Weekly Insights
+        # -----------------------------------
+        with st.container():
+            st.subheader("💡 Weekly Insights")
+            weekly_recs = []
+        
+        if total_hours_week > 15:
+            weekly_recs.append({"priority": 90, "category": "Overload", "message": f"You have {total_hours_week:.1f} hours of meetings this week. Prioritize delegating or declining non-essential invites.", "type": "warning"})
+        
+        if late_meetings_count >= 3:
+            weekly_recs.append({"priority": 85, "category": "Balance", "message": f"You have {late_meetings_count} meetings extending past your earliest leave time ({earliest_leave_time.strftime('%H:%M')}). Try to enforce a harder evening boundary.", "type": "warning"})
+            
+        weekly_recs.append({"priority": 80, "category": "Overload", "message": f"Your busiest day is {busiest_day_date.strftime('%A')} ({meetings_per_day.max()} meetings). Prepare in advance or avoid scheduling heavy tasks immediately before/after.", "type": "warning"})
+        weekly_recs.append({"priority": 75, "category": "Focus", "message": f"{best_day_date.strftime('%A')} is your lightest day ({meetings_per_day.min()} meetings) → guard this day aggressively for deep focus work.", "type": "success"})
+        
+        weekly_recs = sorted(weekly_recs, key=lambda x: x['priority'], reverse=True)[:3]
+        
+        for r in weekly_recs:
+            if r['type'] == 'warning':
+                st.warning(f"**{r['category']}:** {r['message']}")
+            elif r['type'] == 'success':
+                st.success(f"**{r['category']}:** {r['message']}")
+            else:
+                st.info(f"**{r['category']}:** {r['message']}")
+        
+        if not any(r['type'] == 'warning' for r in weekly_recs):
+            st.success("✨ Your week looks structurally sound! Low overload risk detected.")
+    
+        st.markdown("---")
+    
+        # -----------------------------------
+        # 3. Daily Breakdown
+        # -----------------------------------
+        with st.container():
+            st.subheader("📅 Daily Breakdown")
+        
+        for d in dates:
+            day_events = event_df[event_df['Date'] == d].copy()
+            day_events = day_events.sort_values('Start')
+            num_meetings = len(day_events)
+            day_name_str = d.strftime('%A, %d %B')
+            
+            with st.expander(f"{day_name_str} — {num_meetings} meeting{'s' if num_meetings != 1 else ''}"):
+                day_total_mins = day_events['Duration (mins)'].sum()
+                first_meet = day_events.iloc[0]['Start'].strftime('%H:%M') if num_meetings > 0 else "N/A"
+                last_meet = day_events.iloc[-1]['End'].strftime('%H:%M') if num_meetings > 0 else "N/A"
+                longest_meet_mins = day_events['Duration (mins)'].max() if num_meetings > 0 else 0
+                
+                # Find Free Time for the specific day between preferred start and earliest leave
+                day_start = datetime.combine(d, preferred_start_time)
+                day_end = datetime.combine(d, earliest_leave_time)
+                local_free_mins = 0
+                
+                last_e = day_start
+                for _, row in day_events.iterrows():
+                    ev_s = max(day_start, row['Start'])
+                    ev_e = min(day_end, row['End'])
+                    if ev_s > ev_e: ev_s, ev_e = ev_e, ev_s
+                    if ev_s > last_e:
+                        gap = (ev_s - last_e).total_seconds() / 60.0
+                        local_free_mins += gap
+                    last_e = max(last_e, ev_e)
+                
+                if last_e < day_end:
+                    gap = (day_end - last_e).total_seconds() / 60.0
+                    local_free_mins += gap
+                
+                # Display Daily Metrics
+                c1, c2, c3, c4, c5 = st.columns(5)
+                c1.metric("Tot. Meet Time", f"{int(day_total_mins//60)}h {int(day_total_mins%60)}m")
+                c2.metric("Free Time", f"{int(local_free_mins//60)}h {int(local_free_mins%60)}m")
+                c3.metric("Longest Meet", f"{int(longest_meet_mins)}m")
+                c4.metric("First Start", first_meet)
+                c5.metric("Last End", last_meet)
+                
+                # Visual Agenda Display
+                st.markdown("##### 📝 Schedule")
+                
+                agenda_html = ['<div class="agenda-container">']
+                last_end_agenda = datetime.combine(d, preferred_start_time)
+                
+                for _, row in day_events.iterrows():
+                    ev_start = row['Start']
+                    ev_end = row['End']
+                    title = row['Event']
+                    dur = row['Duration (mins)']
+                    
+                    # Free block logic
+                    if ev_start > last_end_agenda:
+                        gap = (ev_start - last_end_agenda).total_seconds() / 60.0
+                        if gap >= 30:
+                            agenda_html.append(
+                                '<div class="agenda-free">'
+                                f"☕ {last_end_agenda.strftime('%H:%M')} – {ev_start.strftime('%H:%M')} | {int(gap)} min Free Block"
+                                '</div>'
+                            )
+                    
+                    # Meeting card logic
+                    color_class = "normal"
+                    if dur < 30: color_class = "short"
+                    elif dur > 90: color_class = "long"
+                    
+                    agenda_html.append(
+                        f'<div class="agenda-card {color_class}">'
+                        f'<div class="agenda-time">{ev_start.strftime("%H:%M")} – {ev_end.strftime("%H:%M")}</div>'
+                        f'<div class="agenda-title">🔹 {title}</div>'
+                        f'<div class="agenda-duration">🕒 {int(dur)} mins</div>'
+                        '</div>'
+                    )
+                    
+                    last_end_agenda = max(last_end_agenda, ev_end)
+                
+                # Free block logic to end of day boundary
+                day_end_agenda = datetime.combine(d, earliest_leave_time)
+                if last_end_agenda < day_end_agenda:
+                    gap = (day_end_agenda - last_end_agenda).total_seconds() / 60.0
+                    if gap >= 30:
+                        agenda_html.append(
+                            '<div class="agenda-free">'
+                            f"🚀 {last_end_agenda.strftime('%H:%M')} – {day_end_agenda.strftime('%H:%M')} | {int(gap)} min Focus / Wrap-up"
+                            '</div>'
+                        )
+    
+                agenda_html.append('</div>')
+                st.markdown("".join(agenda_html), unsafe_allow_html=True)
+                
+                with st.expander("Show raw events table"):
+                    display_df = day_events.copy()
+                    display_df['Start'] = display_df['Start'].dt.strftime('%H:%M')
+                    display_df['End'] = display_df['End'].dt.strftime('%H:%M')
+                    st.dataframe(display_df[['Event', 'Start', 'End', 'Duration (mins)']], use_container_width=True)
+                
+                # Daily Recommendations
+                st.markdown("##### 💡 Daily Advice")
+                show_more_day = st.checkbox("Show more recommendations", key=f"show_more_{d}")
+                max_recs = 6 if show_more_day else 3
+                
+                recs = []
+                
+                # Rule 1: Lunch verification
+                lunch_start = datetime.combine(d, time(12, 0))
+                lunch_end = datetime.combine(d, time(14, 0))
+                has_lunch = False
+                l_track = lunch_start
+                for _, row in day_events.iterrows():
+                    ev_start = row['Start']
+                    if ev_start > l_track and ev_start <= lunch_end:
+                        if (ev_start - l_track).total_seconds() / 60.0 >= 30:
+                            has_lunch = True
+                    l_track = max(l_track, row['End'])
+                if l_track < lunch_end and (lunch_end - l_track).total_seconds() / 60.0 >= 30:
+                    has_lunch = True
+                    
+                if not has_lunch and num_meetings > 0:
+                    recs.append({"priority": 95, "category": "Break", "message": "No proper lunch break scheduled → guard 30+ minutes between 12:00 and 14:00.", "type": "warning"})
+    
+                # Rule 2: Overloads
+                if day_total_mins > 240:
+                    recs.append({"priority": 90, "category": "Overload", "message": "Heavy meeting day (>4 hrs) → avoid demanding tasks immediately after meetings.", "type": "warning"})
+                if num_meetings >= 5:
+                    recs.append({"priority": 85, "category": "Overload", "message": f"{num_meetings} meetings today → evaluate deferring non-essential ones.", "type": "warning"})
+                    
+                # Rule 3: Buffer integration (long / back-to-back)
+                if longest_meet_mins > 90:
+                    recs.append({"priority": 80, "category": "Buffer", "message": "You have a long meeting (>90 mins) → ensure you take a strict recovery buffer immediately afterward.", "type": "warning"})
+    
+                has_b2b = False
+                for i in range(len(day_events) - 1):
+                    curr_end = day_events.iloc[i]['End']
+                    next_start = day_events.iloc[i+1]['Start']
+                    gap = (next_start - curr_end).total_seconds() / 60.0
+                    
+                    # Back-to-back buffer
+                    if 0 <= gap < 10:
+                        has_b2b = True
+                        
+                    # Focus block / Email window (integrate directly)
+                    if gap >= 60:
+                        recs.append({"priority": 65, "category": "Focus", "message": f"Large free block from {curr_end.strftime('%H:%M')} to {next_start.strftime('%H:%M')} → reserve this exclusively for deep work.", "type": "success"})
+                    elif 30 <= gap < 60:
+                        recs.append({"priority": 60, "category": "Email", "message": f"Short gap from {curr_end.strftime('%H:%M')} to {next_start.strftime('%H:%M')} → optimal window for processing emails/admin.", "type": "info"})
+                        
+                if has_b2b:
+                    recs.append({"priority": 80, "category": "Buffer", "message": "You have consecutive back-to-back meetings → consider stepping away for short 5-minute transition breaks.", "type": "warning"})
+                    
+                # Rule 4: Preferred bounds and commute
+                if num_meetings > 0:
+                    first_m = day_events.iloc[0]['Start']
+                    if first_m > day_start and (first_m - day_start).total_seconds() / 60.0 >= 60:
+                        recs.append({"priority": 68, "category": "Focus", "message": f"Your morning is entirely clear until {first_m.strftime('%H:%M')} → excellent time for uninterrupted focus.", "type": "success"})
+    
+                    last_m = day_events.iloc[-1]['End']
+                    
+                    # No afternoon meetings check (After 13:00)
+                    if last_m.hour < 13:
+                        recs.append({"priority": 70, "category": "Focus", "message": "You do not have meetings in the afternoon, so this is a great time to complete important tasks or admin work.", "type": "success"})
+                    
+                    if last_m >= day_end:
+                        arr_time = last_m + pd.Timedelta(minutes=commute_time)
+                        recs.append({"priority": 50, "category": "Commute", "message": f"Last meeting runs until {last_m.strftime('%H:%M')}. With commute, you'd arrive home around {arr_time.strftime('%H:%M')}.", "type": "warning"})
+                    else:
+                        rem_mins = (day_end - last_m).total_seconds() / 60.0
+                        if rem_mins <= 45:
+                            recs.append({"priority": 60, "category": "Commute", "message": f"No meetings after {last_m.strftime('%H:%M')}. Assuming tasks are complete, leaving around your earliest departure ({earliest_leave_time.strftime('%H:%M')}) is realistic.", "type": "info"})
+                        else:
+                            recs.append({"priority": 58, "category": "Admin", "message": f"No meetings after {last_m.strftime('%H:%M')}. Use the remaining time until {earliest_leave_time.strftime('%H:%M')} for focused work or end-of-day planning.", "type": "info"})
+                    
+                # Sort and trim daily recommendations
+                recs = sorted(recs, key=lambda x: x['priority'], reverse=True)
+                final_recs = []
+                seen_cats = set()
+                for r in recs:
+                    # Filter to max 1 per category for diversity
+                    if r['category'] not in seen_cats:
+                        final_recs.append(r)
+                        seen_cats.add(r['category'])
+                
+                final_recs_trimmed = final_recs[:max_recs]
+                
+                if not final_recs_trimmed:
+                    st.success("✨ Your day is perfectly balanced. Enjoy!")
+                else:
+                    for r in final_recs_trimmed:
+                        if r['type'] == 'warning':
+                            st.warning(f"**{r['category']}:** {r['message']}")
+                        elif r['type'] == 'success':
+                            st.success(f"**{r['category']}:** {r['message']}")
+                        else:
+                            st.info(f"**{r['category']}:** {r['message']}")
+    
+        st.markdown("---")
+        
+        # -----------------------------------
+        # 4. Behavioral Interpretation
+        # -----------------------------------
+        with st.container():
+            st.subheader("🧩 Behavioral Interpretation")
+            st.markdown("**Based on your weekly schedule patterns, your work rhythm is most similar to:**")
+            
+            # Rule-based heuristic match leveraging contextual week variables
+            if total_hours_week >= 15 and (focus_score < 4.0 or late_meetings_count >= 3):
+                matched_profile = "The Overworked & Exhausted"
+                match_reason = f"Your week shows a heavy meeting load ({total_hours_week:.1f} hours) with frequent interruptions, significantly reducing your opportunity for deep work."
+                sugg_1 = f"You have {late_meetings_count} late meetings this week. Consider enforcing a strict log-off boundary to avoid compounding exhaustion." if late_meetings_count > 0 else "Avoid scheduling complex tasks at the end of the day when background fatigue is highest."
+                sugg_2 = f"{best_day_date.strftime('%A')} is your lightest day. Guard this block aggressively for uninterrupted deep work to catch up without distractions."
+                match_border = "#ef4444"
+                match_bg = "#fef2f2"
+                match_icon = "🚨"
+                
+            elif focus_score >= 6.0 and total_hours_week <= 12 and late_meetings_count <= 1:
+                matched_profile = "The Balanced Worker"
+                match_reason = f"Your schedule maintains an excellent separation between collaboration and focus time."
+                sugg_1 = f"Maintain the boundaries you've set, especially on {best_day_date.strftime('%A')} where you have the highest focus efficiency."
+                sugg_2 = "Use short 10-minute buffers after intense meetings to avoid accumulating cognitive fatigue throughout the day."
+                match_border = "#10b981"
+                match_bg = "#f0fdf4"
+                match_icon = "✅"
+                
+            elif fragmentation_score >= 6.0 or (total_hours_week < 15 and late_meetings_count >= 2):
+                matched_profile = "The Sleep-Deprived / Fragmented"
+                match_reason = f"Your schedule is highly scattered. Even with fewer total hours, frequent context-switching prevents meaningful progress and raises overall exhaustion."
+                sugg_1 = f"Batch your meetings! For example, {busiest_day_date.strftime('%A')} is loaded with disjointed blocks. Consolidate those calls to open up contiguous free blocks."
+                sugg_2 = "Turn off notifications entirely during gaps shorter than 30 minutes to give your brain a true recovery transition."
+                match_border = "#f59e0b"
+                match_bg = "#fffbeb"
+                match_icon = "⚠️"
+                
+            else:
+                matched_profile = "The Flexible Worker"
+                match_reason = "Your week shows a balanced workload, but frequent interruptions or ad-hoc meetings may reduce your focus efficiency."
+                st.markdown(f'''
+                <div style="background-color: {match_bg}; border-left: 5px solid {match_border}; border-radius: 8px; padding: 1.5rem; margin-top: 1rem; box-shadow: 0 4px 6px -1px rgba(0,0,0,0.05); color: #1f2937;">
+                    <h3 style="margin-top: 0; color: #111827;">{match_icon} {matched_profile}</h3>
+                    <p style="font-size: 1.05rem; margin-bottom: 1.5rem; line-height: 1.6;"><strong>Why?</strong> {match_reason}</p>
+                    <h5 style="color: #374151; margin-bottom: 0.5rem; font-weight: 600;">Contextual Recommendations:</h5>
+                    <ul style="padding-left: 1.5rem; margin-bottom: 1.5rem; line-height: 1.6;">
+                        <li style="margin-bottom: 0.5rem;">{sugg_1}</li>
+                        <li>{sugg_2}</li>
+                    </ul>
+                    <p style="font-size: 0.8rem; color: #6b7280; margin: 0; font-style: italic;">
+                        Note: This is an analytical estimation based purely on your calendar timeline. It functions independently of the machine learning clustering model.
+                    </p>
+                </div>
+                ''', unsafe_allow_html=True)
     
     # ==========================================
     # 5. WEARABLE INTEGRATION PROTOTYPE
