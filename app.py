@@ -202,6 +202,16 @@ if st.sidebar.button("Sign Out", use_container_width=True):
     st.rerun()
 
 users = load_users()
+
+# Safety check: ensure user is logged in before accessing user_data
+if not st.session_state['logged_in'] or not st.session_state['user_email']:
+    st.warning("Please log in to continue.")
+    st.stop()
+
+if st.session_state['user_email'] not in users:
+    users[st.session_state['user_email']] = {'tasks': [], 'profile_name': None, 'profile_result': {}, 'profile_inputs': {}}
+    save_users(users)
+
 user_data = users[st.session_state['user_email']]
 
 # --------- Model & Utils Injection ---------
@@ -1587,7 +1597,7 @@ elif menu == "Profile Insights":
             k1.metric("Avg Work Hours", f"{avg_work:.1f} hr")
             k2.metric("Avg Sleep Hours", f"{avg_sleep:.1f} hr")
             k3.metric("Avg Fatigue", f"{avg_fatigue:.1f} / 10")
-            k4.metric("Avg Burnout", f"{avg_burnout:.1f} / 10")
+            k4.metric("Avg Burnout", f"{avg_burnout:.1f} / 100")
             
             st.info("📌 **Observation:** Higher work hours are intrinsically linked to elevated fatigue. Guaranteeing 7+ hours of sleep per night acts as the most aggressive buffer against compounding burnout scores.")
         
