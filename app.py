@@ -373,6 +373,92 @@ if menu == "Dashboard":
 
     st.markdown("<br>", unsafe_allow_html=True)
 
+    # ── Pull saved calendar data ──────────────────────────────────────────────
+    active_events = []
+    if 'calendar_events' in st.session_state and st.session_state['calendar_events']:
+        active_events = st.session_state['calendar_events']
+    else:
+        saved_events = user_data.get('calendar_events', [])
+        if saved_events:
+            loaded_events = []
+            for ev in saved_events:
+                loaded_events.append({
+                    'Event': ev['Event'],
+                    'Start': datetime.fromisoformat(ev['Start']),
+                    'End': datetime.fromisoformat(ev['End']),
+                    'Duration (mins)': ev['Duration (mins)'],
+                    'Date': datetime.fromisoformat(ev['Date']).date()
+                })
+            st.session_state['calendar_events'] = loaded_events
+            st.session_state['calendar_filename'] = user_data.get('calendar_filename', "Saved Calendar.ics")
+            active_events = loaded_events
+
+    has_calendar = len(active_events) > 0
+    if has_calendar:
+        import pandas as pd
+        event_df = pd.DataFrame(active_events)
+        event_df = event_df.sort_values('Start').reset_index(drop=True)
+        dates = event_df['Date'].unique()
+        num_days = len(dates)
+        
+        preferred_start_time = time(9, 0)
+        earliest_leave_time = time(17, 0)
+        
+        # 1. Focus Score
+        large_blocks_count = 0
+        total_free_mins = 0
+        for d in dates:
+            day_events = event_df[event_df['Date'] == d].sort_values('Start')
+            day_start = datetime.combine(d, preferred_start_time)
+            day_end = datetime.combine(d, earliest_leave_time)
+            
+            last_end_tracker = day_start
+            for _, row in day_events.iterrows():
+                ev_start = max(day_start, row['Start'])
+                ev_end = min(day_end, row['End'])
+                if ev_start > ev_end: 
+                    ev_start, ev_end = ev_end, ev_start
+                    
+                if ev_start > last_end_tracker:
+                    gap = (ev_start - last_end_tracker).total_seconds() / 60.0
+                    total_free_mins += gap
+                    if gap >= 60: large_blocks_count += 1
+                    
+                last_end_tracker = max(last_end_tracker, ev_end)
+                
+            if last_end_tracker < day_end:
+                gap = (day_end - last_end_tracker).total_seconds() / 60.0
+                total_free_mins += gap
+                if gap >= 60: large_blocks_count += 1
+                
+        focus_score = round(min(10.0, (large_blocks_count / max(1, num_days)) * 3), 1)
+        
+        # 2. Busiest Day
+        meetings_per_day = event_df.groupby('Date').size()
+        busiest_day_date = meetings_per_day.idxmax()
+        busiest_day_str = busiest_day_date.strftime('%a') # e.g. Mon, Tue
+        
+        # 3. Free Blocks
+        free_blocks_str = f"{large_blocks_count} blocks"
+        
+        # 4. Late Meetings
+        late_meetings_count = len(event_df[event_df['End'].dt.time > earliest_leave_time])
+        late_meetings_str = f"{late_meetings_count} meetings"
+        
+        cal_status_txt = "Active"
+        cal_status_bg = "#dcfce7"
+        cal_status_color = "#15803d"
+        cal_desc = f"Analyzing <b>{st.session_state.get('calendar_filename', 'Saved Calendar')}</b> with {len(event_df)} events this week."
+    else:
+        focus_score = "—"
+        busiest_day_str = "—"
+        free_blocks_str = "—"
+        late_meetings_str = "—"
+        cal_status_txt = "Upload to activate"
+        cal_status_bg = "#eff6ff"
+        cal_status_color = "#2563eb"
+        cal_desc = "Upload your <strong>.ics calendar file</strong> to unlock your weekly schedule analysis, focus block scoring, meeting load, and daily recommendations."
+
     # ── Three main panels ─────────────────────────────────────────────────────
     p1, p2, p3 = st.columns(3)
 
@@ -449,32 +535,31 @@ if menu == "Dashboard":
             <div style="display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:1rem;">
                 <div style="font-size:0.72rem;font-weight:700;color:#6b7280;text-transform:uppercase;
                             letter-spacing:0.07em;">Calendar Analyzer</div>
-                <span style="background:#eff6ff;color:#2563eb;font-size:0.7rem;
-                             font-weight:700;padding:2px 10px;border-radius:20px;">Upload to activate</span>
+                <span style="background:{cal_status_bg};color:{cal_status_color};font-size:0.7rem;
+                             font-weight:700;padding:2px 10px;border-radius:20px;">{cal_status_txt}</span>
             </div>
             <div style="font-size:1rem;font-weight:600;color:#111827;margin-bottom:0.5rem;">
                 Schedule Health Overview
             </div>
-            <div style="font-size:0.82rem;color:#6b7280;margin-bottom:1.1rem;">
-                Upload your <strong>.ics calendar file</strong> to unlock your weekly schedule analysis,
-                focus block scoring, meeting load, and daily recommendations.
+            <div style="font-size:0.82rem;color:#6b7280;margin-bottom:1.1rem;min-height:3.6rem;line-height:1.4;">
+                {cal_desc}
             </div>
             <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-bottom:1rem;">
                 <div style="background:#eff6ff;border-radius:8px;padding:0.6rem;text-align:center;">
                     <div style="font-size:0.8rem;font-weight:700;color:#1d4ed8;">Focus Score</div>
-                    <div style="font-size:0.7rem;color:#9ca3af;">Upload .ics to see</div>
+                    <div style="font-size:0.9rem;font-weight:800;color:#1e3a8a;margin-top:0.25rem;">{focus_score}{' / 10' if has_calendar else ''}</div>
                 </div>
                 <div style="background:#eff6ff;border-radius:8px;padding:0.6rem;text-align:center;">
                     <div style="font-size:0.8rem;font-weight:700;color:#1d4ed8;">Busiest Day</div>
-                    <div style="font-size:0.7rem;color:#9ca3af;">Upload .ics to see</div>
+                    <div style="font-size:0.9rem;font-weight:800;color:#1e3a8a;margin-top:0.25rem;">{busiest_day_str}</div>
                 </div>
                 <div style="background:#eff6ff;border-radius:8px;padding:0.6rem;text-align:center;">
                     <div style="font-size:0.8rem;font-weight:700;color:#1d4ed8;">Free Blocks</div>
-                    <div style="font-size:0.7rem;color:#9ca3af;">Upload .ics to see</div>
+                    <div style="font-size:0.9rem;font-weight:800;color:#1e3a8a;margin-top:0.25rem;">{free_blocks_str}</div>
                 </div>
                 <div style="background:#eff6ff;border-radius:8px;padding:0.6rem;text-align:center;">
                     <div style="font-size:0.8rem;font-weight:700;color:#1d4ed8;">Late Meetings</div>
-                    <div style="font-size:0.7rem;color:#9ca3af;">Upload .ics to see</div>
+                    <div style="font-size:0.9rem;font-weight:800;color:#1e3a8a;margin-top:0.25rem;">{late_meetings_str}</div>
                 </div>
             </div>
             <div style="font-size:0.75rem;color:#9ca3af;">
@@ -1070,20 +1155,26 @@ elif menu == "Calendar Analyzer":
             else:
                 matched_profile = "The Flexible Worker"
                 match_reason = "Your week shows a balanced workload, but frequent interruptions or ad-hoc meetings may reduce your focus efficiency."
-                st.markdown(f'''
-                <div style="background-color: {match_bg}; border-left: 5px solid {match_border}; border-radius: 8px; padding: 1.5rem; margin-top: 1rem; box-shadow: 0 4px 6px -1px rgba(0,0,0,0.05); color: #1f2937;">
-                    <h3 style="margin-top: 0; color: #111827;">{match_icon} {matched_profile}</h3>
-                    <p style="font-size: 1.05rem; margin-bottom: 1.5rem; line-height: 1.6;"><strong>Why?</strong> {match_reason}</p>
-                    <h5 style="color: #374151; margin-bottom: 0.5rem; font-weight: 600;">Contextual Recommendations:</h5>
-                    <ul style="padding-left: 1.5rem; margin-bottom: 1.5rem; line-height: 1.6;">
-                        <li style="margin-bottom: 0.5rem;">{sugg_1}</li>
-                        <li>{sugg_2}</li>
-                    </ul>
-                    <p style="font-size: 0.8rem; color: #6b7280; margin: 0; font-style: italic;">
-                        Note: This is an analytical estimation based purely on your calendar timeline. It functions independently of the machine learning clustering model.
-                    </p>
-                </div>
-                ''', unsafe_allow_html=True)
+                sugg_1 = f"Identify your best focus window on {best_day_date.strftime('%A')} (your lightest day) and permanently block it out directly in your calendar."
+                sugg_2 = "Evaluate if any of your recurring scattered meetings across the week can be consolidated to an afternoon."
+                match_border = "#3b82f6"
+                match_bg = "#eff6ff"
+                match_icon = "☕"
+            
+            st.markdown(f'''
+            <div style="background-color: {match_bg}; border-left: 5px solid {match_border}; border-radius: 8px; padding: 1.5rem; margin-top: 1rem; box-shadow: 0 4px 6px -1px rgba(0,0,0,0.05); color: #1f2937;">
+                <h3 style="margin-top: 0; color: #111827;">{match_icon} {matched_profile}</h3>
+                <p style="font-size: 1.05rem; margin-bottom: 1.5rem; line-height: 1.6;"><strong>Why?</strong> {match_reason}</p>
+                <h5 style="color: #374151; margin-bottom: 0.5rem; font-weight: 600;">Contextual Recommendations:</h5>
+                <ul style="padding-left: 1.5rem; margin-bottom: 1.5rem; line-height: 1.6;">
+                    <li style="margin-bottom: 0.5rem;">{sugg_1}</li>
+                    <li>{sugg_2}</li>
+                </ul>
+                <p style="font-size: 0.8rem; color: #6b7280; margin: 0; font-style: italic;">
+                    Note: This is an analytical estimation based purely on your calendar timeline. It functions independently of the machine learning clustering model.
+                </p>
+            </div>
+            ''', unsafe_allow_html=True)
     
     # ==========================================
     # 5. WEARABLE INTEGRATION PROTOTYPE
