@@ -935,6 +935,36 @@ elif menu == "Task Prioritization":
         if active_other_name:
             st.info(f"⚠️ Timer is running for **\"{active_other_name}\"**. Starting here will pause and save that session.")
 
+        # ── Live-tick: client-side JS updates the display every second ─────────
+        if is_timing_this and timer_start is not None:
+            _start_ts = int(timer_start.timestamp())
+            _acc      = accumulated
+            import streamlit.components.v1 as _components
+            _components.html(f"""
+            <script>
+            (function() {{
+                const startTs = {_start_ts};
+                const accumulated = {_acc};
+                const fmt = (s) => {{
+                    const m = Math.floor(s / 60);
+                    const sec = s % 60;
+                    return String(m).padStart(2,'0') + ' : ' + String(sec).padStart(2,'0');
+                }};
+                function tick() {{
+                    const now = Math.floor(Date.now() / 1000);
+                    const elapsed = Math.max(0, now - startTs);
+                    const total = accumulated + elapsed;
+                    const doc = window.parent.document;
+                    const displays = doc.querySelectorAll('.timer-display');
+                    const totals = doc.querySelectorAll('.timer-total');
+                    if (displays.length > 0) displays[displays.length-1].textContent = fmt(elapsed);
+                    if (totals.length > 0) totals[totals.length-1].textContent = 'Total accumulated: ' + fmt(total);
+                }}
+                tick();
+                setInterval(tick, 1000);
+            }})();
+            </script>
+            """, height=0)
     # ── Task List ─────────────────────────────────────────────────────────────
     st.markdown('<div class="section-header">Your Tasks</div>', unsafe_allow_html=True)
     users     = load_users()
