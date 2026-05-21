@@ -965,6 +965,22 @@ elif menu == "Task Prioritization":
             }})();
             </script>
             """, height=0)
+
+        # ── Focus music link ──────────────────────────────────────────────────
+        st.markdown('''
+        <div style="text-align:center;margin:0.75rem 0 1.5rem 0;">
+            <a href="https://www.youtube.com/watch?v=sdhh7AYzsTY" target="_blank"
+               style="display:inline-flex;align-items:center;gap:8px;
+                      background:linear-gradient(135deg,#1e1b4b,#312e81);
+                      color:#c7d2fe;text-decoration:none;padding:10px 22px;
+                      border-radius:10px;font-size:0.88rem;font-weight:600;
+                      box-shadow:0 3px 12px rgba(99,102,241,0.3);
+                      transition:all 0.2s;">
+                🎧 Focus Music — Study with me on YouTube
+            </a>
+        </div>
+        ''', unsafe_allow_html=True)
+
     # ── Task List ─────────────────────────────────────────────────────────────
     st.markdown('<div class="section-header">Your Tasks</div>', unsafe_allow_html=True)
     users     = load_users()
