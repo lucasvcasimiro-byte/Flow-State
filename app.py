@@ -1,7 +1,19 @@
+import streamlit as st
+import pandas as pd
+import numpy as np
+import seaborn as sns
+import matplotlib.pyplot as plt
+from sklearn.cluster import KMeans
+from icalendar import Calendar
+from datetime import datetime, time, timedelta
+import pickle
+import warnings
+import json
+import os
+import hashlib
+import math
+
 # Supabase integration removed per user request – only challenges remain.
-
-# Supabase helper functions removed – only challenges remain
-
 
 warnings.filterwarnings('ignore')
 st.set_page_config(page_title="FlowState Productivity", layout="wide", page_icon="⚡")
@@ -253,18 +265,8 @@ st.sidebar.markdown(f'''
 menu = st.sidebar.radio(
     "Navigation",
     ["Dashboard", "Task Prioritization", "Calendar Analyzer",
-     "Wearable & Recovery", "Profile Insights", "🏆 Challenges", "🤝 Shared Tasks"],
+     "Wearable & Recovery", "Profile Insights", "🏆 Challenges"],
     label_visibility="collapsed"
-)
-
-# Supabase status pill in sidebar
-_sb_ok = get_supabase() is not None
-st.sidebar.markdown(
-    f'<div style="margin-top:0.5rem;font-size:0.72rem;padding:3px 10px;border-radius:20px;'
-    f'display:inline-block;background:{"#d1fae5" if _sb_ok else "#fee2e2"};'
-    f'color:{"#065f46" if _sb_ok else "#991b1b"};font-weight:600;">'
-    f'{"• Supabase connected" if _sb_ok else "○ Supabase offline"}</div>',
-    unsafe_allow_html=True
 )
 
 if menu == "Profile Insights":
@@ -754,31 +756,7 @@ if menu == "Dashboard":
     else:
         st.success("All tasks are complete.")
 
-    # ── Shared Tasks preview strip (only when Supabase is live) ──────────────────
-    if get_supabase() is not None:
-        st.markdown("<br>", unsafe_allow_html=True)
-        st.markdown('<div class="section-header">🤝 Group Shared Tasks</div>', unsafe_allow_html=True)
-        _shared = sb_fetch_tasks()
-        _pending_shared = [t for t in _shared if t.get('status') == 'Pending']
-        if not _pending_shared:
-            st.info("✅ No pending shared tasks right now — the group is all caught up!")
-        else:
-            _cols = st.columns(2)
-            for _si, _st_row in enumerate(_pending_shared[:4]):
-                _pri   = _st_row.get('priority', 'Medium')
-                _badge = f"badge-{_pri.lower()}"
-                _dl    = _st_row.get('deadline')
-                _dl_str = f" · Due {_dl}" if _dl else ""
-                _by    = _st_row.get('created_by', '?').split('@')[0]
-                with _cols[_si % 2]:
-                    st.markdown(f'''
-                    <div style="display:flex;align-items:center;gap:8px;padding:0.5rem 0;border-bottom:1px solid #f3f4f6;">
-                        <span style="flex:1;font-size:0.9rem;color:#111827;font-weight:500;">{_st_row.get("name","?")}</span>
-                        <span class="{_badge}">{_pri}</span>
-                        <span style="font-size:0.72rem;color:#9ca3af;">{_by}{_dl_str}</span>
-                    </div>''', unsafe_allow_html=True)
-            if len(_pending_shared) > 4:
-                st.caption(f"+{len(_pending_shared)-4} more — open ❮ Shared Tasks to view all.")
+
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -1944,298 +1922,6 @@ elif menu == "Profile Insights":
             k4.metric("Avg Burnout",     f"{avg_burnout:.1f} / 100")
             st.info("📌 **Observation:** Higher work hours are intrinsically linked to elevated fatigue. Guaranteeing 7+ hours of sleep per night acts as the most aggressive buffer against compounding burnout scores.")
 
-
-# ══════════════════════════════════════════════════════════════════════════════
-# 🤝 SHARED TASKS (Supabase-backed multi-user collaboration)
-# ══════════════════════════════════════════════════════════════════════════════
-elif menu == "🤝 Shared Tasks":
-    st.markdown('<div class="header-style">🤝 Shared Tasks</div>', unsafe_allow_html=True)
-    st.markdown('<div class="subheader-style">Collaborate with your group — tasks shared here are visible and editable by everyone.</div>', unsafe_allow_html=True)
-
-    # ── Supabase connectivity gate ─────────────────────────────────────────────────
-    _sb = get_supabase()
-    if not _sb:
-        st.markdown('''
-        <div style="background:#fffbeb;border:2px solid #f59e0b;border-radius:16px;padding:2rem 2.5rem;max-width:640px;margin:2rem auto;">
-            <div style="font-size:2rem;margin-bottom:0.75rem;">⚠️</div>
-            <div style="font-size:1.1rem;font-weight:700;color:#92400e;margin-bottom:0.5rem;">Supabase not connected</div>
-            <div style="color:#78350f;font-size:0.9rem;line-height:1.7;">
-                To enable Shared Tasks you need to:<br>
-                <ol style="margin:0.5rem 0 0 1.2rem;">
-                    <li>Create a free project at <strong>supabase.com</strong></li>
-                    <li>Run the SQL in <code>.streamlit/secrets.toml</code> setup guide</li>
-                    <li>Fill in your URL &amp; anon key in <code>.streamlit/secrets.toml</code></li>
-                    <li>Run <code>pip install supabase</code> if not yet installed</li>
-                    <li>Restart Streamlit</li>
-                </ol>
-            </div>
-        </div>
-        ''', unsafe_allow_html=True)
-        st.stop()
-
-    me = st.session_state['user_email']
-    my_name = user_data.get('username', me.split('@')[0].capitalize())
-
-    # ── Fetch all tasks ─────────────────────────────────────────────────────────
-    shared_tasks  = sb_fetch_tasks()
-    s_pending     = [t for t in shared_tasks if t.get('status') == 'Pending']
-    s_completed   = [t for t in shared_tasks if t.get('status') == 'Completed']
-    my_created    = [t for t in shared_tasks if t.get('created_by') == me]
-    my_completed  = [t for t in shared_tasks if t.get('completed_by') == me]
-
-    # ── Top KPI strip ──────────────────────────────────────────────────────────
-    def _skpi(label, val, sub, accent):
-        return f'''
-        <div style="background:#fff;border-radius:12px;padding:1rem 1.2rem;
-                    border:1px solid #e5e7eb;box-shadow:0 2px 6px rgba(0,0,0,0.04);">
-            <div style="font-size:0.68rem;font-weight:700;color:#6b7280;text-transform:uppercase;
-                        letter-spacing:0.06em;margin-bottom:0.3rem;">{label}</div>
-            <div style="font-size:1.7rem;font-weight:800;color:{accent};line-height:1;">{val}</div>
-            <div style="font-size:0.72rem;color:#9ca3af;margin-top:0.2rem;">{sub}</div>
-        </div>'''
-
-    k1, k2, k3, k4 = st.columns(4)
-    k1.markdown(_skpi("Total Shared",    len(shared_tasks),  "tasks in the database", "#2563eb"), unsafe_allow_html=True)
-    k2.markdown(_skpi("Pending",         len(s_pending),     "still to do",           "#f59e0b"), unsafe_allow_html=True)
-    k3.markdown(_skpi("Completed",       len(s_completed),   "tasks done by group",   "#10b981"), unsafe_allow_html=True)
-    k4.markdown(_skpi("My Contributions",len(my_created),    f"{len(my_completed)} completed by me", "#6366f1"), unsafe_allow_html=True)
-
-    st.markdown("<br>", unsafe_allow_html=True)
-
-    # ── Two-column layout ──────────────────────────────────────────────────────────
-    col_form, col_board = st.columns([1, 2], gap="large")
-
-    # ───────────────────────────────────────────────────────────────────────────
-    # LEFT — Add task form
-    # ───────────────────────────────────────────────────────────────────────────
-    with col_form:
-        st.markdown('<div class="section-header">Post a Shared Task</div>', unsafe_allow_html=True)
-        with st.form("shared_task_form", clear_on_submit=True):
-            s_name     = st.text_input("Task name *", placeholder="e.g. Prepare slides for Monday demo")
-            s_priority = st.selectbox("Priority", ["High", "Medium", "Low"])
-            s_deadline = st.date_input("Deadline (optional)", value=None)
-            s_notes    = st.text_area("Notes (optional)", placeholder="Any context for your teammates...", height=90)
-            s_submit   = st.form_submit_button("📤 Post to Group", use_container_width=True)
-
-            if s_submit:
-                if not s_name.strip():
-                    st.warning("Please enter a task name.")
-                else:
-                    result = sb_add_task(
-                        name       = s_name.strip(),
-                        priority   = s_priority,
-                        deadline   = s_deadline if s_deadline else None,
-                        notes      = s_notes.strip() if s_notes.strip() else None,
-                        created_by = me,
-                    )
-                    if result:
-                        st.success(f"✅ Task \u2018{s_name.strip()}\u2019 posted to the group!")
-                        st.rerun()
-                    else:
-                        st.error("Failed to post task. Check your Supabase connection.")
-
-        # ─ Recent activity feed ───────────────────────────────────────────
-        st.markdown("<br>", unsafe_allow_html=True)
-        st.markdown('<div class="section-header">🔔 Recent Activity</div>', unsafe_allow_html=True)
-
-        # Show the 5 most recent changes (newest first, already ordered)
-        activity_rows = shared_tasks[:5]
-        if not activity_rows:
-            st.caption("No activity yet.")
-        else:
-            for act in activity_rows:
-                act_who  = act.get('created_by', '?').split('@')[0]
-                act_when = act.get('created_at', '')[:10]
-                act_stat = act.get('status', 'Pending')
-                act_done_by = act.get('completed_by', '')
-                if act_stat == 'Completed' and act_done_by:
-                    done_who = act_done_by.split('@')[0]
-                    act_line = f"🟢 <b>{done_who}</b> completed \u2018{act['name']}\u2019"
-                else:
-                    act_line = f"⚪ <b>{act_who}</b> posted \u2018{act['name']}\u2019 ({act.get('priority','?')})"
-                st.markdown(
-                    f'<div style="font-size:0.82rem;color:#374151;padding:0.35rem 0;'
-                    f'border-bottom:1px solid #f3f4f6;">{act_line}'
-                    f'<span style="float:right;color:#9ca3af;">{act_when}</span></div>',
-                    unsafe_allow_html=True)
-
-    # ───────────────────────────────────────────────────────────────────────────
-    # RIGHT — Task board
-    # ───────────────────────────────────────────────────────────────────────────
-    with col_board:
-        st.markdown('<div class="section-header">📄 Task Board</div>', unsafe_allow_html=True)
-
-        # Filter + sort controls
-        fc1, fc2, fc3 = st.columns([1, 1, 1])
-        with fc1:
-            board_filter = st.selectbox("Show", ["All", "Pending", "Completed", "Mine"], key="sb_filter", label_visibility="collapsed")
-        with fc2:
-            board_sort = st.selectbox("Sort by", ["Newest first", "Priority", "Deadline"], key="sb_sort", label_visibility="collapsed")
-        with fc3:
-            if st.button("🔄 Refresh", key="sb_refresh", use_container_width=True):
-                st.rerun()
-
-        # Apply filter
-        if board_filter == "Pending":
-            display_tasks = s_pending
-        elif board_filter == "Completed":
-            display_tasks = s_completed
-        elif board_filter == "Mine":
-            display_tasks = my_created
-        else:
-            display_tasks = shared_tasks
-
-        # Apply sort
-        _pri_order = {"High": 0, "Medium": 1, "Low": 2}
-        if board_sort == "Priority":
-            display_tasks = sorted(display_tasks, key=lambda t: _pri_order.get(t.get('priority','Medium'), 1))
-        elif board_sort == "Deadline":
-            display_tasks = sorted(display_tasks,
-                                   key=lambda t: t.get('deadline') or "9999-99-99")
-        # "Newest first" is already the default from Supabase query
-
-        if not display_tasks:
-            st.markdown('''
-            <div style="background:#f8fafc;border:2px dashed #d1d5db;border-radius:12px;
-                        padding:2rem;text-align:center;color:#9ca3af;margin-top:1rem;">
-                <div style="font-size:2rem;">🎉</div>
-                <div style="font-weight:600;margin-top:0.5rem;">No tasks here!</div>
-                <div style="font-size:0.85rem;">Post the first shared task using the form on the left.</div>
-            </div>
-            ''', unsafe_allow_html=True)
-        else:
-            for task in display_tasks:
-                t_id       = task.get('id')
-                t_name     = task.get('name', '?')
-                t_pri      = task.get('priority', 'Medium')
-                t_status   = task.get('status', 'Pending')
-                t_creator  = task.get('created_by', '?').split('@')[0]
-                t_dl       = task.get('deadline')
-                t_notes    = task.get('notes')
-                t_done_by  = task.get('completed_by', '')
-                t_created  = task.get('created_at', '')[:10]
-                is_mine    = task.get('created_by') == me
-                is_done    = t_status == 'Completed'
-
-                # Card colour by priority / status
-                if is_done:
-                    card_border, card_bg = '#10b981', '#f0fdf4'
-                elif t_pri == 'High':
-                    card_border, card_bg = '#ef4444', '#fff5f5'
-                elif t_pri == 'Low':
-                    card_border, card_bg = '#6366f1', '#eef2ff'
-                else:
-                    card_border, card_bg = '#f59e0b', '#fffbeb'
-
-                pri_badge_map = {'High': 'badge-high', 'Medium': 'badge-medium', 'Low': 'badge-low'}
-                pri_badge = pri_badge_map.get(t_pri, 'badge-medium')
-
-                dl_html    = f'<span style="font-size:0.72rem;color:#6b7280;">&#128197; {t_dl}</span>' if t_dl else ''
-                status_lbl = (
-                    f'<span style="background:#d1fae5;color:#065f46;font-size:0.7rem;'
-                    f'font-weight:700;padding:2px 8px;border-radius:20px;">✅ Done by {t_done_by.split("@")[0]}</span>'
-                    if is_done else
-                    '<span style="background:#fef3c7;color:#92400e;font-size:0.7rem;'
-                    'font-weight:700;padding:2px 8px;border-radius:20px;">⏳ Pending</span>'
-                )
-                notes_html = (
-                    f'<div style="font-size:0.78rem;color:#6b7280;margin-top:0.4rem;'
-                    f'font-style:italic;">💬 {t_notes}</div>' if t_notes else ''
-                )
-
-                st.markdown(f'''
-                <div style="background:{card_bg};border:1px solid {card_border}33;
-                            border-left:4px solid {card_border};border-radius:12px;
-                            padding:1rem 1.2rem;margin-bottom:10px;
-                            box-shadow:0 2px 6px rgba(0,0,0,0.04);">
-                    <div style="display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:0.35rem;">
-                        <div style="font-weight:700;color:#{'6b7280' if is_done else '111827'};'
-                             font-size:0.97rem;{'text-decoration:line-through;' if is_done else ''}">
-                            {t_name}
-                        </div>
-                        <div style="display:flex;gap:6px;align-items:center;flex-shrink:0;">
-                            <span class="{pri_badge}">{t_pri}</span>
-                            {status_lbl}
-                        </div>
-                    </div>
-                    <div style="display:flex;gap:12px;align-items:center;flex-wrap:wrap;">
-                        <span style="font-size:0.72rem;color:#9ca3af;">👤 {t_creator} &middot; {t_created}</span>
-                        {dl_html}
-                    </div>
-                    {notes_html}
-                </div>
-                ''', unsafe_allow_html=True)
-
-                # Action buttons row
-                btn_cols = st.columns([1, 1, 1, 3])
-                if not is_done:
-                    with btn_cols[0]:
-                        if st.button("✅ Complete", key=f"done_{t_id}", use_container_width=True):
-                            sb_complete_task(t_id, me)
-                            st.rerun()
-                else:
-                    with btn_cols[0]:
-                        if st.button("↩️ Reopen", key=f"reopen_{t_id}", use_container_width=True):
-                            sb_reopen_task(t_id)
-                            st.rerun()
-                if is_mine:
-                    with btn_cols[1]:
-                        if st.button("🗑️ Delete", key=f"del_{t_id}", use_container_width=True):
-                            sb_delete_task(t_id)
-                            st.rerun()
-
-    # ── Calendar integration hint ───────────────────────────────────────────────
-    cal_evs = st.session_state.get('calendar_events', [])
-    if cal_evs and s_pending:
-        st.markdown("---")
-        st.markdown('<div class="section-header">📅 Calendar Fit Analysis</div>', unsafe_allow_html=True)
-        st.markdown("Pending shared tasks that could be scheduled into your free focus blocks today:")
-
-        today = datetime.now().date()
-        today_evs = [e for e in cal_evs if e.get('Date') == today]
-        if not today_evs:
-            st.info("No calendar events found for today — you have full availability to tackle shared tasks!")
-        else:
-            ev_df_cal = pd.DataFrame(today_evs).sort_values('Start')
-            free_gaps = []
-            last_end  = datetime.combine(today, time(9, 0))
-            day_end   = datetime.combine(today, time(17, 0))
-            for _, row in ev_df_cal.iterrows():
-                ev_s = max(last_end, row['Start'])
-                ev_e = min(day_end,  row['End'])
-                if ev_s > last_end:
-                    gap_mins = (ev_s - last_end).total_seconds() / 60
-                    if gap_mins >= 30:
-                        free_gaps.append((last_end.strftime('%H:%M'), ev_s.strftime('%H:%M'), int(gap_mins)))
-                last_end = max(last_end, ev_e)
-            if last_end < day_end:
-                gap_mins = (day_end - last_end).total_seconds() / 60
-                if gap_mins >= 30:
-                    free_gaps.append((last_end.strftime('%H:%M'), day_end.strftime('%H:%M'), int(gap_mins)))
-
-            if not free_gaps:
-                st.warning("Your calendar is fully booked today — consider rescheduling some meetings!")
-            else:
-                g_cols = st.columns(min(len(free_gaps), 3))
-                for gi, (gs, ge, gm) in enumerate(free_gaps[:3]):
-                    with g_cols[gi]:
-                        st.markdown(f'''
-                        <div style="background:#eff6ff;border:1px solid #bfdbfe;border-radius:10px;
-                                    padding:0.8rem 1rem;text-align:center;">
-                            <div style="font-size:0.72rem;font-weight:700;color:#1d4ed8;
-                                        text-transform:uppercase;letter-spacing:0.05em;">Free Block</div>
-                            <div style="font-size:1.1rem;font-weight:800;color:#1e3a8a;margin:0.3rem 0;">{gs}–{ge}</div>
-                            <div style="font-size:0.8rem;color:#3b82f6;">{gm} min available</div>
-                        </div>''', unsafe_allow_html=True)
-                high_pending = [t for t in s_pending if t.get('priority') == 'High']
-                if high_pending:
-                    st.markdown(f"💡 **Suggested:** Use your next free block to tackle **{high_pending[0]['name']}** (High priority, posted by {high_pending[0].get('created_by','?').split('@')[0]}).")
-
-
-
-# ==========================================
-# CHALLENGES PAGE
-# ==========================================
 elif menu == "🏆 Challenges":
     st.markdown('<div class="header-style">🏆 Productivity Challenges</div>', unsafe_allow_html=True)
     st.markdown('<div class="subheader-style">Set daily goals, earn badges, and level up your work habits.</div>', unsafe_allow_html=True)
