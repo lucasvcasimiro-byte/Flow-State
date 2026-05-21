@@ -646,11 +646,11 @@ if menu == "Dashboard":
         snap = user_data.get('wearable_snapshot', {})
         w_prev_sleep   = snap.get('sleep',   6.5)
         w_prev_fatigue = snap.get('fatigue', 7)
-        w_prev_stress  = snap.get('stress',  62)
+        w_prev_stress  = snap.get('stress',  6.2)
         w_prev_steps   = snap.get('steps',   4200)
         snap_date      = snap.get('date', None)
         _sl = max(0, min(100, (w_prev_sleep  - 4) * 25))
-        _st = max(0, min(100, 100 - w_prev_stress))
+        _st = max(0, min(100, (10 - w_prev_stress) * 10))
         _ft = max(0, min(100, (10 - w_prev_fatigue) * 11.1))
         _ac = max(0, min(100, w_prev_steps / 100))
         _rs = round(_sl * 0.40 + _st * 0.25 + _ft * 0.25 + _ac * 0.10)
@@ -665,8 +665,8 @@ if menu == "Dashboard":
                 <span style="font-size:0.88rem;font-weight:700;color:{col};">{val}</span>
             </div>'''
 
-        s_label = "Low" if w_prev_stress < 34 else ("Medium" if w_prev_stress < 67 else "High")
-        s_col   = "#10b981" if w_prev_stress < 34 else ("#f59e0b" if w_prev_stress < 67 else "#ef4444")
+        s_label = "Low" if w_prev_stress < 3.4 else ("Medium" if w_prev_stress < 6.7 else "High")
+        s_col   = "#10b981" if w_prev_stress < 3.4 else ("#f59e0b" if w_prev_stress < 6.7 else "#ef4444")
         rows = (
             small_metric("🌙", "Sleep",          f"{w_prev_sleep}h",     "#6366f1" if w_prev_sleep >= 7 else "#ef4444") +
             small_metric("🔋", "Morning Fatigue", f"{w_prev_fatigue}/10", "#ef4444" if w_prev_fatigue >= 7 else "#10b981") +
@@ -1452,7 +1452,7 @@ elif menu == "Wearable & Recovery":
     st.markdown('<div class="header-style">Wearable & Recovery</div>', unsafe_allow_html=True)
     st.markdown('<div class="subheader-style">Simulate biometric inputs to see your daily physiological readiness score and personalised recovery plan.</div>', unsafe_allow_html=True)
 
-    BASELINE = {'sleep': 6.8, 'hr': 72, 'stress': 50, 'steps': 6000, 'fatigue': 5.0, 'sed': 120}
+    BASELINE = {'sleep': 6.8, 'hr': 72, 'stress': 5.0, 'steps': 6000, 'fatigue': 5.0, 'sed': 120}
 
     with st.expander("⚙️  Adjust Biometric Inputs", expanded=True):
         ci1, ci2, ci3 = st.columns(3)
@@ -1460,7 +1460,7 @@ elif menu == "Wearable & Recovery":
             w_sleep   = st.slider("Sleep last night (h)",         2.0, 12.0, 6.5, 0.25)
             w_hr      = st.slider("Avg resting heart rate (bpm)", 40,  150,  74)
         with ci2:
-            w_stress  = st.slider("Stress level (0–100)",         0,   100,  62)
+            w_stress  = st.slider("Stress level (0–10)",          0.0, 10.0, 6.2, 0.1)
             w_steps   = st.slider("Steps today",                  0,   20000, 4200, 100)
         with ci3:
             w_fatigue = st.slider("Morning fatigue (1–10)",       1,   10,   7)
@@ -1477,7 +1477,7 @@ elif menu == "Wearable & Recovery":
 
     # ── Derived scores ─────────────────────────────────────────────────────────
     sleep_score    = max(0, min(100, (w_sleep  - 4)   * 25))
-    stress_score   = max(0, min(100, 100 - w_stress))
+    stress_score   = max(0, min(100, (10 - w_stress) * 10))
     fatigue_score  = max(0, min(100, (10 - w_fatigue) * 11.1))
     activity_score = max(0, min(100, w_steps / 100))
     recovery_score = round(sleep_score * 0.40 + stress_score * 0.25 + fatigue_score * 0.25 + activity_score * 0.10)
@@ -1486,8 +1486,8 @@ elif menu == "Wearable & Recovery":
     elif recovery_score >= 34: readiness_label, ring_color, ring_bg = "Moderate", "#f59e0b", "#fffbeb"
     else:                      readiness_label, ring_color, ring_bg = "Low",       "#ef4444", "#fef2f2"
 
-    stress_label  = "Low" if w_stress < 34 else ("Medium" if w_stress < 67 else "High")
-    stress_colour = "#10b981" if w_stress < 34 else ("#f59e0b" if w_stress < 67 else "#ef4444")
+    stress_label  = "Low" if w_stress < 3.4 else ("Medium" if w_stress < 6.7 else "High")
+    stress_colour = "#10b981" if w_stress < 3.4 else ("#f59e0b" if w_stress < 6.7 else "#ef4444")
 
     def delta(val, base, higher_is_better=True):
         d_val = val - base
@@ -1565,7 +1565,7 @@ elif menu == "Wearable & Recovery":
         cards_html = (
             metric_card("🌙", "Sleep",      f"{w_sleep:.1f}", "hrs",  sl_d, sl_c, sleep_bar, "#6366f1") +
             metric_card("💓", "Heart Rate", f"{w_hr}",        "bpm",  hr_d, hr_c, hr_bar,    "#ef4444") +
-            metric_card("🧘", "Stress",     stress_label,     "",     st_d, st_c, w_stress,  stress_colour) +
+            metric_card("🧘", "Stress",     stress_label,     "/ 10", st_d, st_c, w_stress * 10, stress_colour) +
             metric_card("👟", "Steps",      f"{w_steps:,}",   "",     sp_d, sp_c, step_bar,  "#10b981") +
             metric_card("🔋", "Fatigue",    f"{w_fatigue}",   "/ 10", ft_d, ft_c, fat_bar,   "#f59e0b") +
             metric_card("🪑", "Sedentary",  f"{w_sed}",       "min",  sd_d, sd_c, sed_bar,   "#9ca3af")
@@ -1588,7 +1588,7 @@ elif menu == "Wearable & Recovery":
     wear_cfgs = [
         (sleep_tw,   "Sleep (hrs)",     "#6366f1", (4,   10)),
         (fatigue_tw, "Morning Fatigue", "#ef4444", (1,   10)),
-        (stress_tw,  "Stress Level",    "#f59e0b", (0,  100)),
+        (stress_tw,  "Stress Level",    "#f59e0b", (0,  10)),
         (steps_tw,   "Daily Steps",     "#10b981", (0, 12000)),
     ]
     for ax_w, (data_w, title_w, color_w, ylim_w) in zip(axes_w, wear_cfgs):
@@ -1645,12 +1645,12 @@ elif menu == "Wearable & Recovery":
     elif w_fatigue >= 6:
         all_recs.append((65, "🔋", "Moderate fatigue detected",
             f"Score {w_fatigue}/10 — use the Pomodoro method today (25 min on / 5 min off) to avoid a mid-afternoon energy crash.", "#f59e0b", "#fffbeb"))
-    if w_stress >= 75:
+    if w_stress >= 7.5:
         all_recs.append((90, "🧘", "Elevated stress — take recovery time",
-            f"Stress at {w_stress}% is significantly above your baseline ({BASELINE['stress']}%). Block 10–15 minutes mid-morning for a screen-free recovery window.", "#ef4444", "#fef2f2"))
-    elif w_stress >= 55:
+            f"Stress at {w_stress:.1f}/10 is significantly above your baseline ({BASELINE['stress']}/10). Block 10–15 minutes mid-morning for a screen-free recovery window.", "#ef4444", "#fef2f2"))
+    elif w_stress >= 5.5:
         all_recs.append((60, "🧘", "Moderate stress level",
-            f"Stress at {w_stress}%. Avoid stacking back-to-back meetings — a 10-min gap between calls helps your nervous system reset.", "#f59e0b", "#fffbeb"))
+            f"Stress at {w_stress:.1f}/10. Avoid stacking back-to-back meetings — a 10-min gap between calls helps your nervous system reset.", "#f59e0b", "#fffbeb"))
     if w_hr > 90:
         all_recs.append((75, "💓", "Elevated resting heart rate",
             f"Resting HR of {w_hr} bpm is {w_hr - BASELINE['hr']} bpm above your baseline. This often indicates residual stress. Prioritise light work only.", "#ef4444", "#fef2f2"))
