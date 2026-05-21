@@ -1,17 +1,7 @@
-import streamlit as st
-import pandas as pd
-import numpy as np
-import seaborn as sns
-import matplotlib.pyplot as plt
-from sklearn.cluster import KMeans
-from icalendar import Calendar
-from datetime import datetime, time, timedelta
-import pickle
-import warnings
-import json
-import os
-import hashlib
-import math
+# Supabase integration removed per user request – only challenges remain.
+
+# Supabase helper functions removed – only challenges remain
+
 
 warnings.filterwarnings('ignore')
 st.set_page_config(page_title="FlowState Productivity", layout="wide", page_icon="⚡")
@@ -262,8 +252,19 @@ st.sidebar.markdown(f'''
 
 menu = st.sidebar.radio(
     "Navigation",
-    ["Dashboard", "Task Prioritization", "Calendar Analyzer", "Wearable & Recovery", "Profile Insights"],
+    ["Dashboard", "Task Prioritization", "Calendar Analyzer",
+     "Wearable & Recovery", "Profile Insights", "🏆 Challenges", "🤝 Shared Tasks"],
     label_visibility="collapsed"
+)
+
+# Supabase status pill in sidebar
+_sb_ok = get_supabase() is not None
+st.sidebar.markdown(
+    f'<div style="margin-top:0.5rem;font-size:0.72rem;padding:3px 10px;border-radius:20px;'
+    f'display:inline-block;background:{"#d1fae5" if _sb_ok else "#fee2e2"};'
+    f'color:{"#065f46" if _sb_ok else "#991b1b"};font-weight:600;">'
+    f'{"• Supabase connected" if _sb_ok else "○ Supabase offline"}</div>',
+    unsafe_allow_html=True
 )
 
 if menu == "Profile Insights":
@@ -752,6 +753,32 @@ if menu == "Dashboard":
             st.caption(f"+{len(pending_tasks)-6} more — open Task Prioritization to view all.")
     else:
         st.success("All tasks are complete.")
+
+    # ── Shared Tasks preview strip (only when Supabase is live) ──────────────────
+    if get_supabase() is not None:
+        st.markdown("<br>", unsafe_allow_html=True)
+        st.markdown('<div class="section-header">🤝 Group Shared Tasks</div>', unsafe_allow_html=True)
+        _shared = sb_fetch_tasks()
+        _pending_shared = [t for t in _shared if t.get('status') == 'Pending']
+        if not _pending_shared:
+            st.info("✅ No pending shared tasks right now — the group is all caught up!")
+        else:
+            _cols = st.columns(2)
+            for _si, _st_row in enumerate(_pending_shared[:4]):
+                _pri   = _st_row.get('priority', 'Medium')
+                _badge = f"badge-{_pri.lower()}"
+                _dl    = _st_row.get('deadline')
+                _dl_str = f" · Due {_dl}" if _dl else ""
+                _by    = _st_row.get('created_by', '?').split('@')[0]
+                with _cols[_si % 2]:
+                    st.markdown(f'''
+                    <div style="display:flex;align-items:center;gap:8px;padding:0.5rem 0;border-bottom:1px solid #f3f4f6;">
+                        <span style="flex:1;font-size:0.9rem;color:#111827;font-weight:500;">{_st_row.get("name","?")}</span>
+                        <span class="{_badge}">{_pri}</span>
+                        <span style="font-size:0.72rem;color:#9ca3af;">{_by}{_dl_str}</span>
+                    </div>''', unsafe_allow_html=True)
+            if len(_pending_shared) > 4:
+                st.caption(f"+{len(_pending_shared)-4} more — open ❮ Shared Tasks to view all.")
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -1916,3 +1943,601 @@ elif menu == "Profile Insights":
             k3.metric("Avg Fatigue",     f"{avg_fatigue:.1f} / 10")
             k4.metric("Avg Burnout",     f"{avg_burnout:.1f} / 100")
             st.info("📌 **Observation:** Higher work hours are intrinsically linked to elevated fatigue. Guaranteeing 7+ hours of sleep per night acts as the most aggressive buffer against compounding burnout scores.")
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# 🤝 SHARED TASKS (Supabase-backed multi-user collaboration)
+# ══════════════════════════════════════════════════════════════════════════════
+elif menu == "🤝 Shared Tasks":
+    st.markdown('<div class="header-style">🤝 Shared Tasks</div>', unsafe_allow_html=True)
+    st.markdown('<div class="subheader-style">Collaborate with your group — tasks shared here are visible and editable by everyone.</div>', unsafe_allow_html=True)
+
+    # ── Supabase connectivity gate ─────────────────────────────────────────────────
+    _sb = get_supabase()
+    if not _sb:
+        st.markdown('''
+        <div style="background:#fffbeb;border:2px solid #f59e0b;border-radius:16px;padding:2rem 2.5rem;max-width:640px;margin:2rem auto;">
+            <div style="font-size:2rem;margin-bottom:0.75rem;">⚠️</div>
+            <div style="font-size:1.1rem;font-weight:700;color:#92400e;margin-bottom:0.5rem;">Supabase not connected</div>
+            <div style="color:#78350f;font-size:0.9rem;line-height:1.7;">
+                To enable Shared Tasks you need to:<br>
+                <ol style="margin:0.5rem 0 0 1.2rem;">
+                    <li>Create a free project at <strong>supabase.com</strong></li>
+                    <li>Run the SQL in <code>.streamlit/secrets.toml</code> setup guide</li>
+                    <li>Fill in your URL &amp; anon key in <code>.streamlit/secrets.toml</code></li>
+                    <li>Run <code>pip install supabase</code> if not yet installed</li>
+                    <li>Restart Streamlit</li>
+                </ol>
+            </div>
+        </div>
+        ''', unsafe_allow_html=True)
+        st.stop()
+
+    me = st.session_state['user_email']
+    my_name = user_data.get('username', me.split('@')[0].capitalize())
+
+    # ── Fetch all tasks ─────────────────────────────────────────────────────────
+    shared_tasks  = sb_fetch_tasks()
+    s_pending     = [t for t in shared_tasks if t.get('status') == 'Pending']
+    s_completed   = [t for t in shared_tasks if t.get('status') == 'Completed']
+    my_created    = [t for t in shared_tasks if t.get('created_by') == me]
+    my_completed  = [t for t in shared_tasks if t.get('completed_by') == me]
+
+    # ── Top KPI strip ──────────────────────────────────────────────────────────
+    def _skpi(label, val, sub, accent):
+        return f'''
+        <div style="background:#fff;border-radius:12px;padding:1rem 1.2rem;
+                    border:1px solid #e5e7eb;box-shadow:0 2px 6px rgba(0,0,0,0.04);">
+            <div style="font-size:0.68rem;font-weight:700;color:#6b7280;text-transform:uppercase;
+                        letter-spacing:0.06em;margin-bottom:0.3rem;">{label}</div>
+            <div style="font-size:1.7rem;font-weight:800;color:{accent};line-height:1;">{val}</div>
+            <div style="font-size:0.72rem;color:#9ca3af;margin-top:0.2rem;">{sub}</div>
+        </div>'''
+
+    k1, k2, k3, k4 = st.columns(4)
+    k1.markdown(_skpi("Total Shared",    len(shared_tasks),  "tasks in the database", "#2563eb"), unsafe_allow_html=True)
+    k2.markdown(_skpi("Pending",         len(s_pending),     "still to do",           "#f59e0b"), unsafe_allow_html=True)
+    k3.markdown(_skpi("Completed",       len(s_completed),   "tasks done by group",   "#10b981"), unsafe_allow_html=True)
+    k4.markdown(_skpi("My Contributions",len(my_created),    f"{len(my_completed)} completed by me", "#6366f1"), unsafe_allow_html=True)
+
+    st.markdown("<br>", unsafe_allow_html=True)
+
+    # ── Two-column layout ──────────────────────────────────────────────────────────
+    col_form, col_board = st.columns([1, 2], gap="large")
+
+    # ───────────────────────────────────────────────────────────────────────────
+    # LEFT — Add task form
+    # ───────────────────────────────────────────────────────────────────────────
+    with col_form:
+        st.markdown('<div class="section-header">Post a Shared Task</div>', unsafe_allow_html=True)
+        with st.form("shared_task_form", clear_on_submit=True):
+            s_name     = st.text_input("Task name *", placeholder="e.g. Prepare slides for Monday demo")
+            s_priority = st.selectbox("Priority", ["High", "Medium", "Low"])
+            s_deadline = st.date_input("Deadline (optional)", value=None)
+            s_notes    = st.text_area("Notes (optional)", placeholder="Any context for your teammates...", height=90)
+            s_submit   = st.form_submit_button("📤 Post to Group", use_container_width=True)
+
+            if s_submit:
+                if not s_name.strip():
+                    st.warning("Please enter a task name.")
+                else:
+                    result = sb_add_task(
+                        name       = s_name.strip(),
+                        priority   = s_priority,
+                        deadline   = s_deadline if s_deadline else None,
+                        notes      = s_notes.strip() if s_notes.strip() else None,
+                        created_by = me,
+                    )
+                    if result:
+                        st.success(f"✅ Task \u2018{s_name.strip()}\u2019 posted to the group!")
+                        st.rerun()
+                    else:
+                        st.error("Failed to post task. Check your Supabase connection.")
+
+        # ─ Recent activity feed ───────────────────────────────────────────
+        st.markdown("<br>", unsafe_allow_html=True)
+        st.markdown('<div class="section-header">🔔 Recent Activity</div>', unsafe_allow_html=True)
+
+        # Show the 5 most recent changes (newest first, already ordered)
+        activity_rows = shared_tasks[:5]
+        if not activity_rows:
+            st.caption("No activity yet.")
+        else:
+            for act in activity_rows:
+                act_who  = act.get('created_by', '?').split('@')[0]
+                act_when = act.get('created_at', '')[:10]
+                act_stat = act.get('status', 'Pending')
+                act_done_by = act.get('completed_by', '')
+                if act_stat == 'Completed' and act_done_by:
+                    done_who = act_done_by.split('@')[0]
+                    act_line = f"🟢 <b>{done_who}</b> completed \u2018{act['name']}\u2019"
+                else:
+                    act_line = f"⚪ <b>{act_who}</b> posted \u2018{act['name']}\u2019 ({act.get('priority','?')})"
+                st.markdown(
+                    f'<div style="font-size:0.82rem;color:#374151;padding:0.35rem 0;'
+                    f'border-bottom:1px solid #f3f4f6;">{act_line}'
+                    f'<span style="float:right;color:#9ca3af;">{act_when}</span></div>',
+                    unsafe_allow_html=True)
+
+    # ───────────────────────────────────────────────────────────────────────────
+    # RIGHT — Task board
+    # ───────────────────────────────────────────────────────────────────────────
+    with col_board:
+        st.markdown('<div class="section-header">📄 Task Board</div>', unsafe_allow_html=True)
+
+        # Filter + sort controls
+        fc1, fc2, fc3 = st.columns([1, 1, 1])
+        with fc1:
+            board_filter = st.selectbox("Show", ["All", "Pending", "Completed", "Mine"], key="sb_filter", label_visibility="collapsed")
+        with fc2:
+            board_sort = st.selectbox("Sort by", ["Newest first", "Priority", "Deadline"], key="sb_sort", label_visibility="collapsed")
+        with fc3:
+            if st.button("🔄 Refresh", key="sb_refresh", use_container_width=True):
+                st.rerun()
+
+        # Apply filter
+        if board_filter == "Pending":
+            display_tasks = s_pending
+        elif board_filter == "Completed":
+            display_tasks = s_completed
+        elif board_filter == "Mine":
+            display_tasks = my_created
+        else:
+            display_tasks = shared_tasks
+
+        # Apply sort
+        _pri_order = {"High": 0, "Medium": 1, "Low": 2}
+        if board_sort == "Priority":
+            display_tasks = sorted(display_tasks, key=lambda t: _pri_order.get(t.get('priority','Medium'), 1))
+        elif board_sort == "Deadline":
+            display_tasks = sorted(display_tasks,
+                                   key=lambda t: t.get('deadline') or "9999-99-99")
+        # "Newest first" is already the default from Supabase query
+
+        if not display_tasks:
+            st.markdown('''
+            <div style="background:#f8fafc;border:2px dashed #d1d5db;border-radius:12px;
+                        padding:2rem;text-align:center;color:#9ca3af;margin-top:1rem;">
+                <div style="font-size:2rem;">🎉</div>
+                <div style="font-weight:600;margin-top:0.5rem;">No tasks here!</div>
+                <div style="font-size:0.85rem;">Post the first shared task using the form on the left.</div>
+            </div>
+            ''', unsafe_allow_html=True)
+        else:
+            for task in display_tasks:
+                t_id       = task.get('id')
+                t_name     = task.get('name', '?')
+                t_pri      = task.get('priority', 'Medium')
+                t_status   = task.get('status', 'Pending')
+                t_creator  = task.get('created_by', '?').split('@')[0]
+                t_dl       = task.get('deadline')
+                t_notes    = task.get('notes')
+                t_done_by  = task.get('completed_by', '')
+                t_created  = task.get('created_at', '')[:10]
+                is_mine    = task.get('created_by') == me
+                is_done    = t_status == 'Completed'
+
+                # Card colour by priority / status
+                if is_done:
+                    card_border, card_bg = '#10b981', '#f0fdf4'
+                elif t_pri == 'High':
+                    card_border, card_bg = '#ef4444', '#fff5f5'
+                elif t_pri == 'Low':
+                    card_border, card_bg = '#6366f1', '#eef2ff'
+                else:
+                    card_border, card_bg = '#f59e0b', '#fffbeb'
+
+                pri_badge_map = {'High': 'badge-high', 'Medium': 'badge-medium', 'Low': 'badge-low'}
+                pri_badge = pri_badge_map.get(t_pri, 'badge-medium')
+
+                dl_html    = f'<span style="font-size:0.72rem;color:#6b7280;">&#128197; {t_dl}</span>' if t_dl else ''
+                status_lbl = (
+                    f'<span style="background:#d1fae5;color:#065f46;font-size:0.7rem;'
+                    f'font-weight:700;padding:2px 8px;border-radius:20px;">✅ Done by {t_done_by.split("@")[0]}</span>'
+                    if is_done else
+                    '<span style="background:#fef3c7;color:#92400e;font-size:0.7rem;'
+                    'font-weight:700;padding:2px 8px;border-radius:20px;">⏳ Pending</span>'
+                )
+                notes_html = (
+                    f'<div style="font-size:0.78rem;color:#6b7280;margin-top:0.4rem;'
+                    f'font-style:italic;">💬 {t_notes}</div>' if t_notes else ''
+                )
+
+                st.markdown(f'''
+                <div style="background:{card_bg};border:1px solid {card_border}33;
+                            border-left:4px solid {card_border};border-radius:12px;
+                            padding:1rem 1.2rem;margin-bottom:10px;
+                            box-shadow:0 2px 6px rgba(0,0,0,0.04);">
+                    <div style="display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:0.35rem;">
+                        <div style="font-weight:700;color:#{'6b7280' if is_done else '111827'};'
+                             font-size:0.97rem;{'text-decoration:line-through;' if is_done else ''}">
+                            {t_name}
+                        </div>
+                        <div style="display:flex;gap:6px;align-items:center;flex-shrink:0;">
+                            <span class="{pri_badge}">{t_pri}</span>
+                            {status_lbl}
+                        </div>
+                    </div>
+                    <div style="display:flex;gap:12px;align-items:center;flex-wrap:wrap;">
+                        <span style="font-size:0.72rem;color:#9ca3af;">👤 {t_creator} &middot; {t_created}</span>
+                        {dl_html}
+                    </div>
+                    {notes_html}
+                </div>
+                ''', unsafe_allow_html=True)
+
+                # Action buttons row
+                btn_cols = st.columns([1, 1, 1, 3])
+                if not is_done:
+                    with btn_cols[0]:
+                        if st.button("✅ Complete", key=f"done_{t_id}", use_container_width=True):
+                            sb_complete_task(t_id, me)
+                            st.rerun()
+                else:
+                    with btn_cols[0]:
+                        if st.button("↩️ Reopen", key=f"reopen_{t_id}", use_container_width=True):
+                            sb_reopen_task(t_id)
+                            st.rerun()
+                if is_mine:
+                    with btn_cols[1]:
+                        if st.button("🗑️ Delete", key=f"del_{t_id}", use_container_width=True):
+                            sb_delete_task(t_id)
+                            st.rerun()
+
+    # ── Calendar integration hint ───────────────────────────────────────────────
+    cal_evs = st.session_state.get('calendar_events', [])
+    if cal_evs and s_pending:
+        st.markdown("---")
+        st.markdown('<div class="section-header">📅 Calendar Fit Analysis</div>', unsafe_allow_html=True)
+        st.markdown("Pending shared tasks that could be scheduled into your free focus blocks today:")
+
+        today = datetime.now().date()
+        today_evs = [e for e in cal_evs if e.get('Date') == today]
+        if not today_evs:
+            st.info("No calendar events found for today — you have full availability to tackle shared tasks!")
+        else:
+            ev_df_cal = pd.DataFrame(today_evs).sort_values('Start')
+            free_gaps = []
+            last_end  = datetime.combine(today, time(9, 0))
+            day_end   = datetime.combine(today, time(17, 0))
+            for _, row in ev_df_cal.iterrows():
+                ev_s = max(last_end, row['Start'])
+                ev_e = min(day_end,  row['End'])
+                if ev_s > last_end:
+                    gap_mins = (ev_s - last_end).total_seconds() / 60
+                    if gap_mins >= 30:
+                        free_gaps.append((last_end.strftime('%H:%M'), ev_s.strftime('%H:%M'), int(gap_mins)))
+                last_end = max(last_end, ev_e)
+            if last_end < day_end:
+                gap_mins = (day_end - last_end).total_seconds() / 60
+                if gap_mins >= 30:
+                    free_gaps.append((last_end.strftime('%H:%M'), day_end.strftime('%H:%M'), int(gap_mins)))
+
+            if not free_gaps:
+                st.warning("Your calendar is fully booked today — consider rescheduling some meetings!")
+            else:
+                g_cols = st.columns(min(len(free_gaps), 3))
+                for gi, (gs, ge, gm) in enumerate(free_gaps[:3]):
+                    with g_cols[gi]:
+                        st.markdown(f'''
+                        <div style="background:#eff6ff;border:1px solid #bfdbfe;border-radius:10px;
+                                    padding:0.8rem 1rem;text-align:center;">
+                            <div style="font-size:0.72rem;font-weight:700;color:#1d4ed8;
+                                        text-transform:uppercase;letter-spacing:0.05em;">Free Block</div>
+                            <div style="font-size:1.1rem;font-weight:800;color:#1e3a8a;margin:0.3rem 0;">{gs}–{ge}</div>
+                            <div style="font-size:0.8rem;color:#3b82f6;">{gm} min available</div>
+                        </div>''', unsafe_allow_html=True)
+                high_pending = [t for t in s_pending if t.get('priority') == 'High']
+                if high_pending:
+                    st.markdown(f"💡 **Suggested:** Use your next free block to tackle **{high_pending[0]['name']}** (High priority, posted by {high_pending[0].get('created_by','?').split('@')[0]}).")
+
+
+
+# ==========================================
+# CHALLENGES PAGE
+# ==========================================
+elif menu == "🏆 Challenges":
+    st.markdown('<div class="header-style">🏆 Productivity Challenges</div>', unsafe_allow_html=True)
+    st.markdown('<div class="subheader-style">Set daily goals, earn badges, and level up your work habits.</div>', unsafe_allow_html=True)
+
+    # ── Live task data ────────────────────────────────────────────────────────
+    all_tasks      = user_data.get('tasks', [])
+    done_tasks     = [t for t in all_tasks if t['status'] == 'Completed']
+    pending_tasks  = [t for t in all_tasks if t['status'] == 'Pending']
+    high_done      = [t for t in done_tasks if t['priority'] == 'High']
+    med_done       = [t for t in done_tasks if t['priority'] == 'Medium']
+    total_tasks    = len(all_tasks)
+    completion_pct = round(len(done_tasks) / max(1, total_tasks) * 100)
+
+    # ── Challenge catalogue (rule-based, no ML needed) ────────────────────────
+    CHALLENGES = [
+        {
+            "id":          "daily_completer",
+            "icon":        "✅",
+            "name":        "Daily Completer",
+            "description": "Complete a target number of tasks (any priority).",
+            "unit":        "tasks completed",
+            "min_target":  1,
+            "max_target":  20,
+            "default":     3,
+            "xp":          50,
+            "get_done":    lambda: len(done_tasks),
+        },
+        {
+            "id":          "priority_hunter",
+            "icon":        "🔥",
+            "name":        "High Priority Hunter",
+            "description": "Complete a target number of High-priority tasks.",
+            "unit":        "high-priority tasks completed",
+            "min_target":  1,
+            "max_target":  10,
+            "default":     2,
+            "xp":          80,
+            "get_done":    lambda: len(high_done),
+        },
+        {
+            "id":          "rate_racer",
+            "icon":        "📈",
+            "name":        "Completion Rate Racer",
+            "description": "Reach a target overall task completion rate (%).",
+            "unit":        "% completion rate",
+            "min_target":  10,
+            "max_target":  100,
+            "default":     80,
+            "xp":          60,
+            "get_done":    lambda: completion_pct,
+        },
+        {
+            "id":          "task_slayer",
+            "icon":        "⚡",
+            "name":        "Task Slayer",
+            "description": "Clear ALL pending tasks — leave nothing on your list.",
+            "unit":        "pending tasks remaining",
+            "min_target":  None,   # fixed: target = total_tasks, done = len(done_tasks)
+            "max_target":  None,
+            "default":     None,
+            "xp":          120,
+            "get_done":    lambda: len(done_tasks),
+        },
+    ]
+
+    # Index by id for fast lookup
+    CHALL_BY_ID = {c['id']: c for c in CHALLENGES}
+
+    # Load stored challenges from user_data
+    stored_challenges = user_data.get('challenges', [])
+
+    # ── Helper: persist challenges ────────────────────────────────────────────
+    def save_challenges(ch_list):
+        users_now = load_users()
+        users_now[st.session_state['user_email']]['challenges'] = ch_list
+        save_users(users_now)
+
+    # ── Helper: compute XP total from achieved challenges ─────────────────────
+    def total_xp(ch_list):
+        xp = 0
+        for ch in ch_list:
+            meta  = CHALL_BY_ID.get(ch['id'])
+            if not meta:
+                continue
+            target = ch.get('target') if ch['id'] != 'task_slayer' else total_tasks
+            done   = meta['get_done']()
+            if target and target > 0 and done >= target:
+                xp += meta['xp']
+        return xp
+
+    earned_xp = total_xp(stored_challenges)
+
+    # ── XP / Level header strip ───────────────────────────────────────────────
+    XP_PER_LEVEL = 100
+    level     = max(1, earned_xp // XP_PER_LEVEL + 1)
+    level_xp  = earned_xp % XP_PER_LEVEL       # progress within current level
+    level_bar = level_xp                         # already 0-100
+
+    st.markdown(f'''
+    <div style="background:linear-gradient(135deg,#1e293b,#0f172a);border-radius:16px;
+                padding:1.5rem 2rem;margin-bottom:1.5rem;display:flex;
+                align-items:center;gap:2rem;flex-wrap:wrap;">
+        <div style="text-align:center;min-width:80px;">
+            <div style="font-size:2.8rem;line-height:1;">🏅</div>
+            <div style="color:#fbbf24;font-weight:800;font-size:1.1rem;">Lv {level}</div>
+        </div>
+        <div style="flex:1;min-width:200px;">
+            <div style="display:flex;justify-content:space-between;margin-bottom:0.4rem;">
+                <span style="color:#e2e8f0;font-weight:700;font-size:1rem;">Productivity Level {level}</span>
+                <span style="color:#94a3b8;font-size:0.82rem;">{earned_xp} XP earned</span>
+            </div>
+            <div style="background:#334155;border-radius:6px;height:10px;">
+                <div style="background:linear-gradient(90deg,#6366f1,#8b5cf6);
+                            width:{level_bar}%;height:10px;border-radius:6px;
+                            transition:width 0.5s ease;"></div>
+            </div>
+            <div style="color:#64748b;font-size:0.75rem;margin-top:0.35rem;">
+                {level_xp} / {XP_PER_LEVEL} XP to Level {level+1}
+            </div>
+        </div>
+        <div style="display:flex;gap:1rem;flex-wrap:wrap;">
+            <div style="background:#1e3a5f;border-radius:10px;padding:0.6rem 1rem;text-align:center;">
+                <div style="font-size:1.3rem;font-weight:800;color:#60a5fa;">{len(stored_challenges)}</div>
+                <div style="font-size:0.7rem;color:#94a3b8;">Active</div>
+            </div>
+            <div style="background:#14532d;border-radius:10px;padding:0.6rem 1rem;text-align:center;">
+                <div style="font-size:1.3rem;font-weight:800;color:#4ade80;">
+                    {sum(1 for ch in stored_challenges
+                         if (meta2 := CHALL_BY_ID.get(ch['id']))
+                         and meta2['get_done']() >= (ch.get('target') or total_tasks))}
+                </div>
+                <div style="font-size:0.7rem;color:#94a3b8;">Achieved</div>
+            </div>
+        </div>
+    </div>
+    ''', unsafe_allow_html=True)
+
+    # ── Two columns: active challenges | add new challenge ────────────────────
+    col_active, col_add = st.columns([3, 2], gap="large")
+
+    # ──────────────────────────────────────────────────────────────────────────
+    # LEFT: Active challenges
+    # ──────────────────────────────────────────────────────────────────────────
+    with col_active:
+        st.markdown('<div class="section-header">Active Challenges</div>', unsafe_allow_html=True)
+
+        if not stored_challenges:
+            st.markdown('''
+            <div style="background:#f8fafc;border:2px dashed #d1d5db;border-radius:12px;
+                        padding:2rem;text-align:center;color:#9ca3af;">
+                <div style="font-size:2.5rem;">🎯</div>
+                <div style="font-weight:600;margin-top:0.5rem;">No active challenges yet</div>
+                <div style="font-size:0.85rem;margin-top:0.3rem;">
+                    Pick a challenge from the panel on the right to get started!
+                </div>
+            </div>
+            ''', unsafe_allow_html=True)
+        else:
+            for idx, ch in enumerate(stored_challenges):
+                meta = CHALL_BY_ID.get(ch['id'])
+                if not meta:
+                    continue
+
+                # Determine target & progress
+                if ch['id'] == 'task_slayer':
+                    target = max(1, total_tasks)
+                    done   = meta['get_done']()
+                else:
+                    target = ch.get('target', meta['default'])
+                    done   = meta['get_done']()
+
+                pct       = min(100, round(done / max(1, target) * 100))
+                achieved  = done >= target
+
+                # Colour theming
+                if achieved:
+                    border_col, bg_col, bar_col = '#10b981', '#f0fdf4', '#10b981'
+                    status_html = '<span style="background:#d1fae5;color:#065f46;font-size:0.72rem;font-weight:700;padding:2px 10px;border-radius:20px;">🏅 ACHIEVED</span>'
+                elif pct >= 60:
+                    border_col, bg_col, bar_col = '#f59e0b', '#fffbeb', '#f59e0b'
+                    status_html = '<span style="background:#fef3c7;color:#92400e;font-size:0.72rem;font-weight:700;padding:2px 10px;border-radius:20px;">⏳ IN PROGRESS</span>'
+                else:
+                    border_col, bg_col, bar_col = '#6366f1', '#eef2ff', '#6366f1'
+                    status_html = '<span style="background:#e0e7ff;color:#3730a3;font-size:0.72rem;font-weight:700;padding:2px 10px;border-radius:20px;">🚀 STARTED</span>'
+
+                # Progress label
+                if ch['id'] == 'rate_racer':
+                    prog_label = f"{done}% / {target}%"
+                elif ch['id'] == 'task_slayer':
+                    prog_label = f"{done} / {target} tasks done"
+                else:
+                    prog_label = f"{done} / {target} {meta['unit']}"
+
+                st.markdown(f'''
+                <div style="background:{bg_col};border:1px solid {border_col}33;
+                            border-left:4px solid {border_col};border-radius:12px;
+                            padding:1.2rem 1.4rem;margin-bottom:12px;
+                            box-shadow:0 2px 8px rgba(0,0,0,0.05);">
+                    <div style="display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:0.5rem;">
+                        <div style="display:flex;align-items:center;gap:10px;">
+                            <span style="font-size:1.5rem;">{meta['icon']}</span>
+                            <div>
+                                <div style="font-weight:700;color:#111827;font-size:0.97rem;">{meta['name']}</div>
+                                <div style="font-size:0.78rem;color:#6b7280;margin-top:1px;">{meta['description']}</div>
+                            </div>
+                        </div>
+                        <div style="display:flex;align-items:center;gap:8px;flex-shrink:0;">
+                            {status_html}
+                            <span style="background:#eff6ff;color:#1d4ed8;font-size:0.72rem;
+                                         font-weight:700;padding:2px 8px;border-radius:20px;">+{meta['xp']} XP</span>
+                        </div>
+                    </div>
+                    <!-- Progress bar -->
+                    <div style="background:#e5e7eb;border-radius:6px;height:8px;margin-top:0.6rem;">
+                        <div style="background:{bar_col};width:{pct}%;height:8px;
+                                    border-radius:6px;transition:width 0.4s ease;"></div>
+                    </div>
+                    <div style="display:flex;justify-content:space-between;margin-top:0.4rem;">
+                        <span style="font-size:0.75rem;color:#6b7280;">{prog_label}</span>
+                        <span style="font-size:0.75rem;font-weight:700;color:{border_col};">{pct}%</span>
+                    </div>
+                    {'<div style="margin-top:0.7rem;background:#d1fae5;border-radius:8px;padding:0.5rem 0.8rem;font-size:0.82rem;color:#065f46;font-weight:600;">🎉 Challenge complete! +' + str(meta["xp"]) + ' XP earned — keep going!</div>' if achieved else ''}
+                </div>
+                ''', unsafe_allow_html=True)
+
+                # Remove button per challenge
+                if st.button(f"Remove", key=f"remove_ch_{idx}", help="Remove this challenge"):
+                    updated = [c for i, c in enumerate(stored_challenges) if i != idx]
+                    save_challenges(updated)
+                    st.rerun()
+
+    # ──────────────────────────────────────────────────────────────────────────
+    # RIGHT: Add a new challenge
+    # ──────────────────────────────────────────────────────────────────────────
+    with col_add:
+        st.markdown('<div class="section-header">Add a Challenge</div>', unsafe_allow_html=True)
+
+        # Show catalogue cards
+        active_ids = {ch['id'] for ch in stored_challenges}
+
+        for c in CHALLENGES:
+            already_active = c['id'] in active_ids
+            card_opacity   = '0.5' if already_active else '1.0'
+
+            st.markdown(f'''
+            <div style="background:#ffffff;border:1px solid #e5e7eb;border-radius:12px;
+                        padding:1rem 1.2rem;margin-bottom:10px;opacity:{card_opacity};
+                        box-shadow:0 1px 4px rgba(0,0,0,0.05);">
+                <div style="display:flex;align-items:center;gap:10px;margin-bottom:0.3rem;">
+                    <span style="font-size:1.3rem;">{c['icon']}</span>
+                    <span style="font-weight:700;color:#111827;font-size:0.92rem;">{c['name']}</span>
+                    <span style="margin-left:auto;background:#eff6ff;color:#1d4ed8;font-size:0.7rem;
+                                 font-weight:700;padding:1px 8px;border-radius:20px;">+{c['xp']} XP</span>
+                </div>
+                <div style="font-size:0.78rem;color:#6b7280;">{c['description']}</div>
+            </div>
+            ''', unsafe_allow_html=True)
+
+            if already_active:
+                st.caption("✅ Already active")
+            else:
+                # Target selector (not shown for Task Slayer)
+                if c['id'] == 'task_slayer':
+                    target_val = total_tasks if total_tasks > 0 else 1
+                    st.caption(f"Target: clear all {total_tasks} task(s) on your list.")
+                else:
+                    target_val = st.number_input(
+                        f"Target for {c['name']}",
+                        min_value=c['min_target'],
+                        max_value=c['max_target'],
+                        value=c['default'],
+                        step=1,
+                        key=f"target_{c['id']}",
+                        label_visibility='collapsed'
+                    )
+                    st.caption(f"Goal: {target_val} {c['unit']}")
+
+                if st.button(f"Activate {c['icon']} {c['name']}", key=f"add_{c['id']}", use_container_width=True):
+                    new_ch = {'id': c['id'], 'target': target_val}
+                    updated = stored_challenges + [new_ch]
+                    save_challenges(updated)
+                    st.rerun()
+
+    # ── Bottom: Live stats snapshot ───────────────────────────────────────────
+    st.markdown("---")
+    st.markdown('<div class="section-header">📊 Your Current Progress Snapshot</div>', unsafe_allow_html=True)
+
+    s1, s2, s3, s4 = st.columns(4)
+    def snap_kpi(col, label, value, sub, accent):
+        col.markdown(f'''
+        <div style="background:#fff;border-radius:12px;padding:1rem 1.2rem;
+                    border:1px solid #e5e7eb;box-shadow:0 2px 6px rgba(0,0,0,0.04);">
+            <div style="font-size:0.68rem;font-weight:700;color:#6b7280;
+                        text-transform:uppercase;letter-spacing:0.06em;margin-bottom:0.3rem;">{label}</div>
+            <div style="font-size:1.6rem;font-weight:800;color:{accent};line-height:1;">{value}</div>
+            <div style="font-size:0.72rem;color:#9ca3af;margin-top:0.2rem;">{sub}</div>
+        </div>''', unsafe_allow_html=True)
+
+    snap_kpi(s1, "Tasks Completed",   len(done_tasks),    f"of {total_tasks} total",  "#10b981")
+    snap_kpi(s2, "High Priority Done", len(high_done),    "high-priority tasks",       "#ef4444")
+    snap_kpi(s3, "Completion Rate",   f"{completion_pct}%", "of all tasks done",       "#6366f1")
+    snap_kpi(s4, "XP Earned",         f"{earned_xp} XP",  f"Level {level} — keep going!", "#f59e0b")
+
+    st.markdown("<br>", unsafe_allow_html=True)
+    st.caption("💡 Tip: Head to **Task Prioritization** to add and complete tasks — your challenge progress updates here automatically!")
